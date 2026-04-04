@@ -6,6 +6,39 @@ Docker orchestration across multiple hosts via SSH. Zero-downtime deployments, T
 korgi deploy --service api
 ```
 
+## Install
+
+**macOS (Apple Silicon)**
+```sh
+curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-macos-arm64.tar.gz | tar xz
+sudo mv korgi /usr/local/bin/
+```
+
+**macOS (Intel)**
+```sh
+curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-macos-amd64.tar.gz | tar xz
+sudo mv korgi /usr/local/bin/
+```
+
+**Linux (x86_64)**
+```sh
+curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-linux-amd64.tar.gz | tar xz
+sudo mv korgi /usr/local/bin/
+```
+
+**Linux (ARM64)**
+```sh
+curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-linux-arm64.tar.gz | tar xz
+sudo mv korgi /usr/local/bin/
+```
+
+**From source**
+```sh
+cargo install --path .
+```
+
+---
+
 Korgi fills the gap between Docker Compose (single host) and Kubernetes (too complex). If you have 2-10 servers and want to deploy containers with zero downtime, Korgi is for you.
 
 ## Features
