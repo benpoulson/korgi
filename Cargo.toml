@@ -41,5 +41,12 @@ futures = "0.3"
 ssh-key = "0.6"
 async-trait = "0.1"
 
+[profile.release]
+opt-level = "z"     # optimize for size
+lto = true          # link-time optimization
+codegen-units = 1   # single codegen unit for better optimization
+panic = "abort"     # smaller than unwinding
+strip = true        # strip debug symbols
+
 [dev-dependencies]
 tempfile = "3.27.0"
