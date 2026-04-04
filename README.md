@@ -77,16 +77,16 @@ This creates a `korgi.toml` template. Edit it with your hosts and services:
 [project]
 name = "myapp"
 
-# --- Entrypoint host (runs Traefik, faces the internet) ---
+# --- Load balancer (runs Traefik, faces the internet) ---
 [[hosts]]
 name = "lb"
+role = "lb"                        # runs Traefik -- no app containers
 address = "203.0.113.1"            # public IP (SSH connects here)
 internal_address = "10.0.0.1"      # private IP (Traefik routes via this)
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
-# No "app" label = no app containers placed here
 
-# --- Worker hosts (run containers, internal only) ---
+# --- Worker nodes (run containers, internal only) ---
 [[hosts]]
 name = "worker-1"
 address = "10.0.0.10"
@@ -105,7 +105,6 @@ labels = ["app"]
 
 [traefik]
 image = "traefik:v3.2"
-hosts = ["lb"]                     # Traefik only on the entrypoint host
 entrypoints = { web = ":80", websecure = ":443" }
 network = "korgi-traefik"
 
@@ -263,7 +262,29 @@ http:
 
 Traefik watches this file for changes and updates routing automatically.
 
-### Host Configuration
+### Host Roles
+
+Every host has a `role` -- either `lb` (load balancer) or `node` (default):
+
+```toml
+[[hosts]]
+name = "lb"
+role = "lb"           # runs Traefik, faces the internet
+address = "203.0.113.1"
+
+[[hosts]]
+name = "worker-1"
+# role = "node"       # default -- runs containers
+address = "10.0.0.10"
+labels = ["app"]
+```
+
+- `role = "lb"` -- Traefik is deployed here automatically. No app containers unless it also has matching placement labels.
+- `role = "node"` (default) -- runs application containers. Traefik is not deployed here.
+
+The `[traefik]` section no longer needs a `hosts` field -- Korgi automatically deploys Traefik to all `role = "lb"` hosts.
+
+### Host Addresses
 
 Each host has two addresses:
 

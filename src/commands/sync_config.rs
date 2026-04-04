@@ -23,10 +23,16 @@ pub async fn sync_traefik_config(
     config: &Config,
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
-    let Some(traefik) = &config.traefik else {
+    if config.traefik.is_none() {
         debug!("No traefik config, skipping config sync");
         return Ok(());
-    };
+    }
+
+    let traefik_hosts = config.traefik_host_names();
+    if traefik_hosts.is_empty() {
+        debug!("No traefik hosts, skipping config sync");
+        return Ok(());
+    }
 
     // Query current live state across all hosts
     let state = LiveState::query(docker_hosts, &config.project.name).await?;
@@ -36,7 +42,7 @@ pub async fn sync_traefik_config(
     debug!("Generated Traefik config ({} bytes)", yaml.len());
 
     // Write to each Traefik host's container
-    for host_name in &traefik.hosts {
+    for host_name in &traefik_hosts {
         let Some(docker) = docker_hosts.get(host_name) else {
             debug!("No Docker connection for Traefik host {}, skipping", host_name);
             continue;

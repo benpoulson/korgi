@@ -19,13 +19,14 @@ pub async fn deploy(
         .as_ref()
         .context("No [traefik] section in config")?;
 
+    let traefik_hosts = config.traefik_host_names();
     output::info(&format!(
         "Deploying Traefik ({}) to {} hosts",
         traefik.image,
-        traefik.hosts.len()
+        traefik_hosts.len()
     ));
 
-    for host_name in &traefik.hosts {
+    for host_name in &traefik_hosts {
         let docker = docker_hosts
             .get(host_name)
             .context(format!("No Docker connection for host {}", host_name))?;
@@ -128,12 +129,9 @@ pub async fn status(
     config: &Config,
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
-    let traefik = config
-        .traefik
-        .as_ref()
-        .context("No [traefik] section in config")?;
-
-    for host_name in &traefik.hosts {
+    config.traefik.as_ref().context("No [traefik] section in config")?;
+    let traefik_hosts = config.traefik_host_names();
+    for host_name in &traefik_hosts {
         let docker = docker_hosts
             .get(host_name)
             .context(format!("No Docker connection for host {}", host_name))?;
@@ -163,12 +161,9 @@ pub async fn logs(
     docker_hosts: &HashMap<String, DockerHost>,
     follow: bool,
 ) -> Result<()> {
-    let traefik = config
-        .traefik
-        .as_ref()
-        .context("No [traefik] section in config")?;
-
-    let host_name = traefik.hosts.first().context("No traefik hosts configured")?;
+    config.traefik.as_ref().context("No [traefik] section in config")?;
+    let traefik_hosts = config.traefik_host_names();
+    let host_name = traefik_hosts.first().context("No traefik hosts configured")?;
     let docker = docker_hosts
         .get(host_name)
         .context(format!("No Docker connection for host {}", host_name))?;

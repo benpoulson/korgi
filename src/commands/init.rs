@@ -11,22 +11,21 @@ name = "myapp"
 # username = "${GHCR_USER}"
 # password = "${GHCR_TOKEN}"
 
-# --- Entrypoint host (runs Traefik, faces the internet) ---
-# This host can be a dedicated load balancer -- no containers required.
-# Korgi generates a Traefik file-provider config that routes to worker hosts.
+# --- Load balancer (runs Traefik, faces the internet) ---
 [[hosts]]
 name = "lb"
+role = "lb"                        # runs Traefik -- no app containers
 address = "203.0.113.1"            # public IP (SSH connects here)
 internal_address = "10.0.0.1"      # private IP (Traefik routes via this)
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
-# No "app" label = no app containers placed here
 
-# --- Worker hosts (run containers, internal only) ---
+# --- Worker nodes (run containers, internal only) ---
 [[hosts]]
 name = "worker-1"
-address = "10.0.0.10"              # SSH address (can be internal if you have VPN)
-internal_address = "10.0.0.10"     # Traefik routes to containers here
+role = "node"                      # default -- runs app containers
+address = "10.0.0.10"
+internal_address = "10.0.0.10"
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
 labels = ["app"]
@@ -41,7 +40,6 @@ labels = ["app"]
 
 [traefik]
 image = "traefik:v3.2"
-hosts = ["lb"]                     # Traefik only on the entrypoint host
 entrypoints = { web = ":80", websecure = ":443" }
 network = "korgi-traefik"
 

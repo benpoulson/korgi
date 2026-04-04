@@ -29,9 +29,23 @@ pub struct RegistryConfig {
     pub password: Option<String>,
 }
 
+/// Host role: load balancer (runs Traefik) or node (runs containers).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostRole {
+    /// Load balancer -- runs Traefik, faces the internet. No app containers by default.
+    Lb,
+    /// Node -- runs application containers.
+    #[default]
+    Node,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostConfig {
     pub name: String,
+    /// Host role: "lb" (runs Traefik) or "node" (runs containers, default).
+    #[serde(default)]
+    pub role: HostRole,
     /// Public/external address -- used for SSH connections.
     pub address: String,
     /// Internal/private address -- used for Traefik load balancing and inter-host traffic.
@@ -51,6 +65,14 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
+    pub fn is_lb(&self) -> bool {
+        self.role == HostRole::Lb
+    }
+
+    pub fn is_node(&self) -> bool {
+        self.role == HostRole::Node
+    }
+
     /// Returns the address to use for SSH connections (public/external).
     pub fn ssh_address(&self) -> &str {
         &self.address
@@ -67,6 +89,7 @@ impl HostConfig {
     pub fn test_host(name: &str, address: &str) -> Self {
         Self {
             name: name.to_string(),
+            role: HostRole::Node,
             address: address.to_string(),
             internal_address: None,
             user: "deploy".to_string(),
@@ -90,6 +113,8 @@ fn default_ssh_port() -> u16 {
 pub struct TraefikConfig {
     #[serde(default = "default_traefik_image")]
     pub image: String,
+    /// Deprecated: use `role = "lb"` on hosts instead. If set, overrides role-based detection.
+    #[serde(default)]
     pub hosts: Vec<String>,
     #[serde(default)]
     pub entrypoints: HashMap<String, String>,
@@ -303,12 +328,23 @@ impl Config {
                 anyhow::bail!("host '{}' address cannot be empty", host.name);
             }
         }
-        // Validate traefik host references
+        // Validate traefik config
         if let Some(traefik) = &self.traefik {
-            let host_names: Vec<&str> = self.hosts.iter().map(|h| h.name.as_str()).collect();
-            for th in &traefik.hosts {
-                if !host_names.contains(&th.as_str()) {
-                    anyhow::bail!("traefik references unknown host '{}'", th);
+            // If hosts is explicitly set, validate references (backwards compat)
+            if !traefik.hosts.is_empty() {
+                let host_names: Vec<&str> = self.hosts.iter().map(|h| h.name.as_str()).collect();
+                for th in &traefik.hosts {
+                    if !host_names.contains(&th.as_str()) {
+                        anyhow::bail!("traefik references unknown host '{}'", th);
+                    }
+                }
+            } else {
+                // No explicit hosts -- must have at least one role=lb host
+                if self.lb_hosts().is_empty() {
+                    anyhow::bail!(
+                        "[traefik] is configured but no hosts have role = \"lb\". \
+                         Add role = \"lb\" to at least one host."
+                    );
                 }
             }
         }
@@ -341,6 +377,27 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Get hosts with role = lb.
+    pub fn lb_hosts(&self) -> Vec<&HostConfig> {
+        self.hosts.iter().filter(|h| h.is_lb()).collect()
+    }
+
+    /// Get hosts with role = node.
+    pub fn node_hosts(&self) -> Vec<&HostConfig> {
+        self.hosts.iter().filter(|h| h.is_node()).collect()
+    }
+
+    /// Get the names of hosts that should run Traefik.
+    /// Uses explicit `[traefik].hosts` if set (backwards compat), otherwise role=lb hosts.
+    pub fn traefik_host_names(&self) -> Vec<String> {
+        if let Some(traefik) = &self.traefik
+            && !traefik.hosts.is_empty()
+        {
+            return traefik.hosts.clone();
+        }
+        self.lb_hosts().iter().map(|h| h.name.clone()).collect()
     }
 
     /// Get the deploy config for a service, using defaults if not specified.
@@ -873,5 +930,138 @@ mod tests {
         assert_eq!(host.ssh_address(), "203.0.113.10");
         assert_eq!(host.internal_addr(), "10.0.0.1");
         assert_eq!(host.port, 2222);
+    }
+
+    // --- Host roles ---
+
+    #[test]
+    fn test_role_default_is_node() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hosts[0].role, HostRole::Node);
+        assert!(config.hosts[0].is_node());
+        assert!(!config.hosts[0].is_lb());
+    }
+
+    #[test]
+    fn test_role_lb() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "lb"
+            role = "lb"
+            address = "1.2.3.4"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hosts[0].role, HostRole::Lb);
+        assert!(config.hosts[0].is_lb());
+    }
+
+    #[test]
+    fn test_lb_hosts_and_node_hosts() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "lb"
+            role = "lb"
+            address = "1.2.3.4"
+            [[hosts]]
+            name = "w1"
+            address = "5.6.7.8"
+            [[hosts]]
+            name = "w2"
+            role = "node"
+            address = "9.10.11.12"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.lb_hosts().len(), 1);
+        assert_eq!(config.lb_hosts()[0].name, "lb");
+        assert_eq!(config.node_hosts().len(), 2);
+    }
+
+    #[test]
+    fn test_traefik_host_names_from_role() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "lb1"
+            role = "lb"
+            address = "1.2.3.4"
+            [[hosts]]
+            name = "lb2"
+            role = "lb"
+            address = "5.6.7.8"
+            [[hosts]]
+            name = "w1"
+            address = "9.10.11.12"
+            [traefik]
+            entrypoints = { web = ":80" }
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let names = config.traefik_host_names();
+        assert_eq!(names, vec!["lb1", "lb2"]);
+    }
+
+    #[test]
+    fn test_traefik_host_names_explicit_overrides_role() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "lb1"
+            role = "lb"
+            address = "1.2.3.4"
+            [[hosts]]
+            name = "w1"
+            address = "5.6.7.8"
+            [traefik]
+            hosts = ["w1"]
+            entrypoints = { web = ":80" }
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // Explicit hosts overrides role-based detection
+        let names = config.traefik_host_names();
+        assert_eq!(names, vec!["w1"]);
+    }
+
+    #[test]
+    fn test_validate_traefik_no_lb_hosts_fails() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "w1"
+            address = "1.2.3.4"
+            [traefik]
+            entrypoints = { web = ":80" }
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("role = \"lb\""));
+    }
+
+    #[test]
+    fn test_validate_traefik_with_lb_hosts_ok() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "lb"
+            role = "lb"
+            address = "1.2.3.4"
+            [traefik]
+            entrypoints = { web = ":80" }
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }

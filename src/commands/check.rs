@@ -11,12 +11,17 @@ pub async fn run(config: &Config) -> Result<()> {
     output::success(&format!("{} services configured", config.services.len()));
 
     if let Some(traefik) = &config.traefik {
+        let traefik_hosts = config.traefik_host_names();
         output::success(&format!(
-            "Traefik: {} on {} hosts",
+            "Traefik: {} on {} hosts ({})",
             traefik.image,
-            traefik.hosts.len()
+            traefik_hosts.len(),
+            traefik_hosts.join(", ")
         ));
     }
+    let lb_count = config.lb_hosts().len();
+    let node_count = config.node_hosts().len();
+    output::success(&format!("{} load balancers, {} nodes", lb_count, node_count));
 
     output::header("SSH Connectivity");
     let pool = SshPool::connect_all(config).await;
