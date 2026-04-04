@@ -7,4 +7,5 @@ pub mod logs;
 pub mod rollback;
 pub mod scale;
 pub mod status;
+pub mod sync_config;
 pub mod traefik;

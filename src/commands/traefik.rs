@@ -4,6 +4,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 
 use crate::cli::output;
+use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 
@@ -46,6 +47,9 @@ pub async fn deploy(
             "--providers.docker=true".to_string(),
             "--providers.docker.exposedbydefault=false".to_string(),
             format!("--providers.docker.network={}", traefik.network),
+            // File provider for cross-host routing (korgi writes dynamic config here)
+            "--providers.file.directory=/etc/korgi/".to_string(),
+            "--providers.file.watch=true".to_string(),
         ];
 
         for (name, addr) in &traefik.entrypoints {
@@ -113,6 +117,9 @@ pub async fn deploy(
         pb.finish_and_clear();
         output::success(&format!("Traefik running on {}", host_name));
     }
+
+    // Sync current routing config into Traefik
+    sync_config::sync_traefik_config(config, docker_hosts).await?;
 
     Ok(())
 }

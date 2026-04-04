@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::cli::output;
+use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 use crate::orchestrator::deploy::deploy_service;
@@ -34,6 +35,11 @@ pub async fn run(
 
     if services.len() > 1 {
         output::success(&format!("All {} services deployed", services.len()));
+    }
+
+    // Sync Traefik routing config with new container topology
+    if !dry_run {
+        sync_config::sync_traefik_config(config, docker_hosts).await?;
     }
 
     Ok(())

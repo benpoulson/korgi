@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::cli::output;
+use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 use crate::orchestrator::state::LiveState;
@@ -46,5 +47,9 @@ pub async fn run(
     pb.finish_and_clear();
 
     output::success(&format!("Destroyed {} containers", containers.len()));
+
+    // Sync Traefik config to remove destroyed backends
+    sync_config::sync_traefik_config(config, docker_hosts).await?;
+
     Ok(())
 }

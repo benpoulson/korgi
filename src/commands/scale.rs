@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
+use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 use crate::orchestrator::scale::scale_service;
@@ -11,5 +12,7 @@ pub async fn run(
     count: u32,
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
-    scale_service(config, service, count, docker_hosts).await
+    scale_service(config, service, count, docker_hosts).await?;
+    sync_config::sync_traefik_config(config, docker_hosts).await?;
+    Ok(())
 }

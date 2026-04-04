@@ -220,6 +220,38 @@ impl DockerHost {
         }
     }
 
+    /// Execute a command inside a running container and return stdout.
+    pub async fn exec_in_container(&self, container: &str, cmd: &[&str]) -> Result<String> {
+        use bollard::exec::CreateExecOptions;
+        use futures::StreamExt;
+
+        let exec_config = CreateExecOptions {
+            cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+
+        let exec = self.client
+            .create_exec(container, exec_config)
+            .await
+            .with_context(|| format!("Failed to create exec on {}", self.host_name))?;
+
+        let output = self.client
+            .start_exec(&exec.id, None)
+            .await
+            .with_context(|| format!("Failed to start exec on {}", self.host_name))?;
+
+        let mut stdout = String::new();
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            while let Some(Ok(msg)) = output.next().await {
+                stdout.push_str(&msg.to_string());
+            }
+        }
+
+        Ok(stdout)
+    }
+
     /// Get the underlying bollard client reference.
     pub fn client(&self) -> &Docker {
         &self.client

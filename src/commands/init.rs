@@ -11,26 +11,37 @@ name = "myapp"
 # username = "${GHCR_USER}"
 # password = "${GHCR_TOKEN}"
 
+# --- Entrypoint host (runs Traefik, faces the internet) ---
+# This host can be a dedicated load balancer -- no containers required.
+# Korgi generates a Traefik file-provider config that routes to worker hosts.
 [[hosts]]
-name = "web1"
-address = "192.168.1.10"          # public IP (SSH connects here)
-# internal_address = "10.0.0.1"  # private IP (Traefik/internal traffic)
-# port = 22                      # SSH port (default: 22)
+name = "lb"
+address = "203.0.113.1"            # public IP (SSH connects here)
+internal_address = "10.0.0.1"      # private IP (Traefik routes via this)
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
-labels = ["web"]
+# No "app" label = no app containers placed here
 
-# [[hosts]]
-# name = "web2"
-# address = "192.168.1.11"
-# internal_address = "10.0.0.2"
-# user = "deploy"
-# ssh_key = "~/.ssh/id_ed25519"
-# labels = ["web"]
+# --- Worker hosts (run containers, internal only) ---
+[[hosts]]
+name = "worker-1"
+address = "10.0.0.10"              # SSH address (can be internal if you have VPN)
+internal_address = "10.0.0.10"     # Traefik routes to containers here
+user = "deploy"
+ssh_key = "~/.ssh/id_ed25519"
+labels = ["app"]
+
+[[hosts]]
+name = "worker-2"
+address = "10.0.0.11"
+internal_address = "10.0.0.11"
+user = "deploy"
+ssh_key = "~/.ssh/id_ed25519"
+labels = ["app"]
 
 [traefik]
 image = "traefik:v3.2"
-hosts = ["web1"]
+hosts = ["lb"]                     # Traefik only on the entrypoint host
 entrypoints = { web = ":80", websecure = ":443" }
 network = "korgi-traefik"
 
@@ -41,8 +52,8 @@ network = "korgi-traefik"
 [[services]]
 name = "web"
 image = "myapp/web:latest"
-replicas = 2
-placement_labels = ["web"]
+replicas = 4
+placement_labels = ["app"]         # Only placed on worker hosts
 
 [services.health]
 path = "/health"
@@ -56,6 +67,7 @@ entrypoints = ["web"]
 
 [services.ports]
 container = 8080
+host_base = 9001                   # Workers expose 9001, 9002, ... for Traefik to reach
 
 [services.env]
 # DATABASE_URL = "${DATABASE_URL}"
