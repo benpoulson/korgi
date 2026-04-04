@@ -111,14 +111,12 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 async fn connect_docker_hosts(
     cfg: &korgi::config::types::Config,
 ) -> Result<HashMap<String, DockerHost>> {
-    let pb = output::spinner("Connecting to Docker on all hosts...");
+    // Connect without spinner first -- SSH may prompt for passphrases
     let mut hosts = HashMap::new();
-
     for host in &cfg.hosts {
         let docker = DockerHost::connect(host).await?;
         hosts.insert(host.name.clone(), docker);
     }
-
-    pb.finish_and_clear();
+    output::success(&format!("Connected to {} hosts", hosts.len()));
     Ok(hosts)
 }
