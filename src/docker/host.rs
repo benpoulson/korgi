@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bollard::Docker;
 use bollard::models::{ContainerCreateBody, NetworkCreateRequest};
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, InspectContainerOptions, InspectNetworkOptions,
     ListContainersOptions, LogsOptions, RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
 
-use crate::config::types::HostConfig;
 use super::traits::DockerHostApi;
+use crate::config::types::HostConfig;
 
 /// Docker client connected to a remote host via SSH.
 pub struct DockerHost {
@@ -24,7 +24,10 @@ impl DockerHost {
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
         let ssh_url = format!("ssh://{}@{}", host.user, host.ssh_address());
-        debug!("Connecting Docker client via {} (port {})", ssh_url, host.port);
+        debug!(
+            "Connecting Docker client via {} (port {})",
+            ssh_url, host.port
+        );
 
         let key_path = host.ssh_key.as_ref().map(|k| expand_tilde(k));
 
@@ -34,13 +37,9 @@ impl DockerHost {
         // system SSH binary picks it up (openssh crate reads ~/.ssh/config by default).
         ensure_ssh_config(host)?;
 
-        let client = Docker::connect_with_ssh(
-            &ssh_url,
-            120,
-            bollard::API_DEFAULT_VERSION,
-            key_path,
-        )
-        .with_context(|| format!("Failed to connect Docker on {}", host.name))?;
+        let client =
+            Docker::connect_with_ssh(&ssh_url, 120, bollard::API_DEFAULT_VERSION, key_path)
+                .with_context(|| format!("Failed to connect Docker on {}", host.name))?;
 
         // Verify connection
         let _: String = client
@@ -57,8 +56,8 @@ impl DockerHost {
 
     /// Connect to a local Docker instance.
     pub fn connect_local() -> Result<Self> {
-        let client = Docker::connect_with_local_defaults()
-            .context("Failed to connect to local Docker")?;
+        let client =
+            Docker::connect_with_local_defaults().context("Failed to connect to local Docker")?;
         Ok(Self {
             client,
             host_name: "local".to_string(),
@@ -84,7 +83,11 @@ impl DockerHost {
 
     /// Pull an image on the remote host.
     #[instrument(skip(self), fields(host = %self.host_name))]
-    pub async fn pull_image(&self, image: &str, auth: Option<bollard::auth::DockerCredentials>) -> Result<()> {
+    pub async fn pull_image(
+        &self,
+        image: &str,
+        auth: Option<bollard::auth::DockerCredentials>,
+    ) -> Result<()> {
         debug!("Pulling image: {}", image);
 
         let (repo, tag) = parse_image_ref(image);
@@ -199,7 +202,11 @@ impl DockerHost {
 
     /// Ensure a Docker network exists, creating it if not.
     pub async fn ensure_network(&self, name: &str) -> Result<()> {
-        match self.client.inspect_network(name, None::<InspectNetworkOptions>).await {
+        match self
+            .client
+            .inspect_network(name, None::<InspectNetworkOptions>)
+            .await
+        {
             Ok(_) => {
                 debug!("Network {} already exists on {}", name, self.host_name);
                 Ok(())
@@ -211,12 +218,9 @@ impl DockerHost {
                     driver: Some("bridge".to_string()),
                     ..Default::default()
                 };
-                self.client
-                    .create_network(options)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to create network {} on {}", name, self.host_name)
-                    })?;
+                self.client.create_network(options).await.with_context(|| {
+                    format!("Failed to create network {} on {}", name, self.host_name)
+                })?;
                 Ok(())
             }
         }
@@ -234,12 +238,14 @@ impl DockerHost {
             ..Default::default()
         };
 
-        let exec = self.client
+        let exec = self
+            .client
             .create_exec(container, exec_config)
             .await
             .with_context(|| format!("Failed to create exec on {}", self.host_name))?;
 
-        let output = self.client
+        let output = self
+            .client
             .start_exec(&exec.id, None)
             .await
             .with_context(|| format!("Failed to start exec on {}", self.host_name))?;
@@ -274,15 +280,15 @@ impl DockerHostApi for DockerHost {
         DockerHost::list_containers(self, filters, all).await
     }
 
-    async fn pull_image(&self, image: &str, auth: Option<bollard::auth::DockerCredentials>) -> Result<()> {
+    async fn pull_image(
+        &self,
+        image: &str,
+        auth: Option<bollard::auth::DockerCredentials>,
+    ) -> Result<()> {
         DockerHost::pull_image(self, image, auth).await
     }
 
-    async fn create_container(
-        &self,
-        name: &str,
-        config: ContainerCreateBody,
-    ) -> Result<String> {
+    async fn create_container(&self, name: &str, config: ContainerCreateBody) -> Result<String> {
         DockerHost::create_container(self, name, config).await
     }
 
@@ -540,10 +546,7 @@ mod tests {
     #[test]
     fn test_parse_image_ref_sha_digest() {
         // sha256 digests use @ not : but let's make sure : in digest doesn't break
-        assert_eq!(
-            parse_image_ref("myapp:sha-abc123"),
-            ("myapp", "sha-abc123")
-        );
+        assert_eq!(parse_image_ref("myapp:sha-abc123"), ("myapp", "sha-abc123"));
     }
 
     #[test]

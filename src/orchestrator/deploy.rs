@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::cli::output;
-use crate::config::types::{Config, ServiceConfig};
 use crate::config::interpolate;
+use crate::config::types::{Config, ServiceConfig};
 use crate::docker::containers::{self, KorgiContainer};
 use crate::docker::labels;
 use crate::docker::registry;
@@ -43,10 +43,7 @@ pub async fn deploy_service<D: DockerHostApi>(
         anyhow::bail!("No hosts match placement labels for service '{}'", svc.name);
     }
 
-    let placements = placement::place_replicas(
-        &matching_hosts.to_vec(),
-        svc.replicas,
-    );
+    let placements = placement::place_replicas(&matching_hosts.to_vec(), svc.replicas);
 
     info!(
         "Generation {} → {} replicas across {} hosts",
@@ -58,12 +55,8 @@ pub async fn deploy_service<D: DockerHostApi>(
     if dry_run {
         output::info("Dry run -- would deploy:");
         for (host, instance) in &placements {
-            let name = labels::container_name(
-                &config.project.name,
-                &svc.name,
-                generation,
-                *instance,
-            );
+            let name =
+                labels::container_name(&config.project.name, &svc.name, generation, *instance);
             output::info(&format!("  {} on {}", name, host.name));
         }
         return Ok(());
@@ -88,9 +81,10 @@ pub async fn deploy_service<D: DockerHostApi>(
         let auth = auth.clone();
         // We can't move docker into the task since we don't own it, so we'll pull sequentially per host
         // In a real impl we'd use Arc or similar
-        docker.pull_image(&image, auth).await.with_context(|| {
-            format!("Failed to pull {} on {}", image, host_name)
-        })?;
+        docker
+            .pull_image(&image, auth)
+            .await
+            .with_context(|| format!("Failed to pull {} on {}", image, host_name))?;
     }
     pb.finish_and_clear();
     output::success(&format!("Image pulled on {} hosts", unique_hosts.len()));
@@ -116,12 +110,8 @@ pub async fn deploy_service<D: DockerHostApi>(
 
     for (host, instance) in &placements {
         let docker = docker_hosts.get(&host.name).unwrap();
-        let container_name = labels::container_name(
-            &config.project.name,
-            &svc.name,
-            generation,
-            *instance,
-        );
+        let container_name =
+            labels::container_name(&config.project.name, &svc.name, generation, *instance);
 
         let container_config = containers::build_container_config(
             &config.project.name,
@@ -186,7 +176,8 @@ pub async fn deploy_service<D: DockerHostApi>(
     // Phase 5: DRAIN OLD
     let old_generation = generation.checked_sub(1);
     if let Some(old_gen) = old_generation {
-        let old_containers: Vec<&KorgiContainer> = state.generation_containers(&svc.name, old_gen)
+        let old_containers: Vec<&KorgiContainer> = state
+            .generation_containers(&svc.name, old_gen)
             .into_iter()
             .filter(|c| c.state == "running")
             .collect();
@@ -295,7 +286,9 @@ mod tests {
         let svc = &config.services[0];
         let hosts = mock_hosts();
 
-        deploy_service(&config, svc, None, &hosts, true).await.unwrap();
+        deploy_service(&config, svc, None, &hosts, true)
+            .await
+            .unwrap();
 
         // Dry run should only list containers (state query), not create/start anything
         let web1_calls = hosts.get("web1").unwrap().get_calls();
@@ -303,10 +296,26 @@ mod tests {
         let all_calls: Vec<_> = web1_calls.iter().chain(web2_calls.iter()).collect();
 
         // Should have list_containers calls (for state query) but no create/start
-        assert!(all_calls.iter().any(|c| matches!(c, DockerCall::ListContainers { .. })));
-        assert!(!all_calls.iter().any(|c| matches!(c, DockerCall::CreateContainer { .. })));
-        assert!(!all_calls.iter().any(|c| matches!(c, DockerCall::StartContainer { .. })));
-        assert!(!all_calls.iter().any(|c| matches!(c, DockerCall::PullImage { .. })));
+        assert!(
+            all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::ListContainers { .. }))
+        );
+        assert!(
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::CreateContainer { .. }))
+        );
+        assert!(
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::StartContainer { .. }))
+        );
+        assert!(
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::PullImage { .. }))
+        );
     }
 
     // --- First Deploy (no existing containers) ---
@@ -317,25 +326,37 @@ mod tests {
         let svc = &config.services[0];
         let hosts = mock_hosts();
 
-        deploy_service(&config, svc, None, &hosts, false).await.unwrap();
+        deploy_service(&config, svc, None, &hosts, false)
+            .await
+            .unwrap();
 
         // Should pull image on both hosts
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
-        let pull_count = all_calls.iter().filter(|c| matches!(c, DockerCall::PullImage { .. })).count();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
+        let pull_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::PullImage { .. }))
+            .count();
         assert!(pull_count >= 1, "Should pull image on at least one host");
 
         // Should create 2 containers (replicas=2)
-        let create_count = all_calls.iter().filter(|c| matches!(c, DockerCall::CreateContainer { .. })).count();
+        let create_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::CreateContainer { .. }))
+            .count();
         assert_eq!(create_count, 2, "Should create 2 containers for 2 replicas");
 
         // Should start 2 containers
-        let start_count = all_calls.iter().filter(|c| matches!(c, DockerCall::StartContainer { .. })).count();
+        let start_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::StartContainer { .. }))
+            .count();
         assert_eq!(start_count, 2, "Should start 2 containers");
 
         // Should ensure network on target hosts
-        let network_count = all_calls.iter().filter(|c| matches!(c, DockerCall::EnsureNetwork { .. })).count();
+        let network_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::EnsureNetwork { .. }))
+            .count();
         assert!(network_count >= 1, "Should ensure network exists");
     }
 
@@ -351,12 +372,11 @@ mod tests {
             .await
             .unwrap();
 
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
 
         // Should pull the overridden image, not the original
-        let pull_calls: Vec<_> = all_calls.iter()
+        let pull_calls: Vec<_> = all_calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::PullImage { image } => Some(image.as_str()),
                 _ => None,
@@ -374,29 +394,56 @@ mod tests {
         let hosts = mock_hosts();
 
         // Add existing gen-1 containers to both hosts
-        hosts.get("web1").unwrap().add_container(mock_container_summary(
-            "old-1", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes (healthy)",
-        ));
-        hosts.get("web2").unwrap().add_container(mock_container_summary(
-            "old-2", "korgi-myapp-api-g1-1", "myapp", "api", 1, 1,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes (healthy)",
-        ));
+        hosts
+            .get("web1")
+            .unwrap()
+            .add_container(mock_container_summary(
+                "old-1",
+                "korgi-myapp-api-g1-0",
+                "myapp",
+                "api",
+                1,
+                0,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::RUNNING,
+                "Up 5 minutes (healthy)",
+            ));
+        hosts
+            .get("web2")
+            .unwrap()
+            .add_container(mock_container_summary(
+                "old-2",
+                "korgi-myapp-api-g1-1",
+                "myapp",
+                "api",
+                1,
+                1,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::RUNNING,
+                "Up 5 minutes (healthy)",
+            ));
 
-        deploy_service(&config, svc, None, &hosts, false).await.unwrap();
+        deploy_service(&config, svc, None, &hosts, false)
+            .await
+            .unwrap();
 
         // Should stop old containers
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
-        let stop_calls: Vec<_> = all_calls.iter()
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
+        let stop_calls: Vec<_> = all_calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::StopContainer { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(stop_calls.contains(&"old-1"), "Should stop old container on web1");
-        assert!(stop_calls.contains(&"old-2"), "Should stop old container on web2");
+        assert!(
+            stop_calls.contains(&"old-1"),
+            "Should stop old container on web1"
+        );
+        assert!(
+            stop_calls.contains(&"old-2"),
+            "Should stop old container on web2"
+        );
     }
 
     // --- Deploy with health check failure rolls back ---
@@ -426,16 +473,29 @@ mod tests {
         }
 
         let result = deploy_service(&config, svc, None, &hosts, false).await;
-        assert!(result.is_err(), "Deploy should fail on health check failure");
+        assert!(
+            result.is_err(),
+            "Deploy should fail on health check failure"
+        );
 
         // Should have attempted to stop and remove the new containers (cleanup)
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
-        let stop_count = all_calls.iter().filter(|c| matches!(c, DockerCall::StopContainer { .. })).count();
-        let remove_count = all_calls.iter().filter(|c| matches!(c, DockerCall::RemoveContainer { .. })).count();
-        assert!(stop_count > 0, "Should stop new containers on health failure");
-        assert!(remove_count > 0, "Should remove new containers on health failure");
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
+        let stop_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::StopContainer { .. }))
+            .count();
+        let remove_count = all_calls
+            .iter()
+            .filter(|c| matches!(c, DockerCall::RemoveContainer { .. }))
+            .count();
+        assert!(
+            stop_count > 0,
+            "Should stop new containers on health failure"
+        );
+        assert!(
+            remove_count > 0,
+            "Should remove new containers on health failure"
+        );
     }
 
     // --- Deploy with no matching hosts fails ---
@@ -462,30 +522,66 @@ mod tests {
 
         // Add old stopped containers from gen 1 and running gen 3
         // With rollback_keep=2, gen 1 should be cleaned (gen 4 - 2 - 1 = 1)
-        hosts.get("web1").unwrap().add_container(mock_container_summary(
-            "ancient", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::EXITED, "Exited (0)",
-        ));
-        hosts.get("web1").unwrap().add_container(mock_container_summary(
-            "current-0", "korgi-myapp-api-g3-0", "myapp", "api", 3, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes (healthy)",
-        ));
-        hosts.get("web2").unwrap().add_container(mock_container_summary(
-            "current-1", "korgi-myapp-api-g3-1", "myapp", "api", 3, 1,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes (healthy)",
-        ));
+        hosts
+            .get("web1")
+            .unwrap()
+            .add_container(mock_container_summary(
+                "ancient",
+                "korgi-myapp-api-g1-0",
+                "myapp",
+                "api",
+                1,
+                0,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::EXITED,
+                "Exited (0)",
+            ));
+        hosts
+            .get("web1")
+            .unwrap()
+            .add_container(mock_container_summary(
+                "current-0",
+                "korgi-myapp-api-g3-0",
+                "myapp",
+                "api",
+                3,
+                0,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::RUNNING,
+                "Up 5 minutes (healthy)",
+            ));
+        hosts
+            .get("web2")
+            .unwrap()
+            .add_container(mock_container_summary(
+                "current-1",
+                "korgi-myapp-api-g3-1",
+                "myapp",
+                "api",
+                3,
+                1,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::RUNNING,
+                "Up 5 minutes (healthy)",
+            ));
 
-        deploy_service(&config, svc, None, &hosts, false).await.unwrap();
+        deploy_service(&config, svc, None, &hosts, false)
+            .await
+            .unwrap();
 
         // Should remove the ancient stopped container
         let web1_calls = hosts.get("web1").unwrap().get_calls();
-        let removed: Vec<_> = web1_calls.iter()
+        let removed: Vec<_> = web1_calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::RemoveContainer { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(removed.contains(&"ancient"), "Should clean up old gen 1 container");
+        assert!(
+            removed.contains(&"ancient"),
+            "Should clean up old gen 1 container"
+        );
     }
 
     // --- Deploy aborts cleanly on pull failure ---
@@ -497,21 +593,26 @@ mod tests {
         let hosts = mock_hosts();
 
         // Make pull fail on web1
-        hosts.get("web1").unwrap().set_pull_error("registry unavailable");
+        hosts
+            .get("web1")
+            .unwrap()
+            .set_pull_error("registry unavailable");
 
         let result = deploy_service(&config, svc, None, &hosts, false).await;
         assert!(result.is_err(), "Deploy should fail when pull fails");
 
         // No containers should have been created on any host
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
         assert!(
-            !all_calls.iter().any(|c| matches!(c, DockerCall::CreateContainer { .. })),
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::CreateContainer { .. })),
             "No containers should be created when pull fails"
         );
         assert!(
-            !all_calls.iter().any(|c| matches!(c, DockerCall::StartContainer { .. })),
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::StartContainer { .. })),
             "No containers should be started when pull fails"
         );
     }

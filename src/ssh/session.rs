@@ -46,7 +46,13 @@ impl SshSession {
     /// Connect to a host via SSH.
     #[instrument(skip_all, fields(host = %host.name, address = %host.address))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
-        debug!("Connecting to {} ({}@{}:{})", host.name, host.user, host.ssh_address(), host.port);
+        debug!(
+            "Connecting to {} ({}@{}:{})",
+            host.name,
+            host.user,
+            host.ssh_address(),
+            host.port
+        );
 
         let config = Arc::new(client::Config::default());
         let handler = SshHandler;

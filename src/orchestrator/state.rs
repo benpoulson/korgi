@@ -64,11 +64,7 @@ impl LiveState {
     }
 
     /// Get containers for a specific service and generation.
-    pub fn generation_containers(
-        &self,
-        service: &str,
-        generation: u64,
-    ) -> Vec<&KorgiContainer> {
+    pub fn generation_containers(&self, service: &str, generation: u64) -> Vec<&KorgiContainer> {
         self.containers
             .iter()
             .filter(|c| c.service == service && c.generation == generation)
@@ -131,9 +127,7 @@ mod tests {
     }
 
     fn empty_state() -> LiveState {
-        LiveState {
-            containers: vec![],
-        }
+        LiveState { containers: vec![] }
     }
 
     fn sample_state() -> LiveState {
@@ -198,9 +192,7 @@ mod tests {
     #[test]
     fn test_running_service_containers_all_stopped() {
         let state = LiveState {
-            containers: vec![
-                make_container("api", 1, 0, "web1", "exited"),
-            ],
+            containers: vec![make_container("api", 1, 0, "web1", "exited")],
         };
         assert!(state.running_service_containers("api").is_empty());
     }
@@ -327,9 +319,7 @@ mod tests {
     #[test]
     fn test_rollback_generation_single_gen() {
         let state = LiveState {
-            containers: vec![
-                make_container("api", 1, 0, "web1", "running"),
-            ],
+            containers: vec![make_container("api", 1, 0, "web1", "running")],
         };
         // Only one generation, nothing to roll back to
         assert_eq!(state.rollback_generation("api"), None);

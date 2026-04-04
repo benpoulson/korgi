@@ -130,14 +130,18 @@ pub mod tests {
             _filters: HashMap<String, Vec<String>>,
             all: bool,
         ) -> Result<Vec<ContainerSummary>> {
-            self.calls.lock().unwrap().push(DockerCall::ListContainers { all });
+            self.calls
+                .lock()
+                .unwrap()
+                .push(DockerCall::ListContainers { all });
             let containers = self.containers.lock().unwrap().clone();
             if all {
                 Ok(containers)
             } else {
-                Ok(containers.into_iter().filter(|c| {
-                    c.state == Some(ContainerSummaryStateEnum::RUNNING)
-                }).collect())
+                Ok(containers
+                    .into_iter()
+                    .filter(|c| c.state == Some(ContainerSummaryStateEnum::RUNNING))
+                    .collect())
             }
         }
 
@@ -157,9 +161,12 @@ pub mod tests {
             name: &str,
             _config: ContainerCreateBody,
         ) -> Result<String> {
-            self.calls.lock().unwrap().push(DockerCall::CreateContainer {
-                name: name.to_string(),
-            });
+            self.calls
+                .lock()
+                .unwrap()
+                .push(DockerCall::CreateContainer {
+                    name: name.to_string(),
+                });
             if let Some(err) = self.create_error.lock().unwrap().as_ref() {
                 anyhow::bail!("{}", err);
             }
@@ -169,9 +176,10 @@ pub mod tests {
         }
 
         async fn start_container(&self, id: &str) -> Result<()> {
-            self.calls.lock().unwrap().push(DockerCall::StartContainer {
-                id: id.to_string(),
-            });
+            self.calls
+                .lock()
+                .unwrap()
+                .push(DockerCall::StartContainer { id: id.to_string() });
             if let Some(err) = self.start_error.lock().unwrap().as_ref() {
                 anyhow::bail!("{}", err);
             }
@@ -187,17 +195,21 @@ pub mod tests {
         }
 
         async fn remove_container(&self, id: &str, force: bool) -> Result<()> {
-            self.calls.lock().unwrap().push(DockerCall::RemoveContainer {
-                id: id.to_string(),
-                force,
-            });
+            self.calls
+                .lock()
+                .unwrap()
+                .push(DockerCall::RemoveContainer {
+                    id: id.to_string(),
+                    force,
+                });
             Ok(())
         }
 
         async fn inspect_container(&self, id: &str) -> Result<ContainerInspectResponse> {
-            self.calls.lock().unwrap().push(DockerCall::InspectContainer {
-                id: id.to_string(),
-            });
+            self.calls
+                .lock()
+                .unwrap()
+                .push(DockerCall::InspectContainer { id: id.to_string() });
             let running = *self.container_running.lock().unwrap();
             let health_status = self.health_status.lock().unwrap().clone();
 
@@ -221,7 +233,11 @@ pub mod tests {
             self.calls.lock().unwrap().push(DockerCall::ImageExists {
                 image: image.to_string(),
             });
-            Ok(self.existing_images.lock().unwrap().contains(&image.to_string()))
+            Ok(self
+                .existing_images
+                .lock()
+                .unwrap()
+                .contains(&image.to_string()))
         }
 
         async fn ensure_network(&self, name: &str) -> Result<()> {

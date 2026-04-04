@@ -27,11 +27,7 @@ pub fn load_and_merge(
     env_name: Option<&str>,
 ) -> anyhow::Result<String> {
     let base_content = std::fs::read_to_string(base_path).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to read config file {}: {}",
-            base_path.display(),
-            e
-        )
+        anyhow::anyhow!("Failed to read config file {}: {}", base_path.display(), e)
     })?;
 
     let Some(env_name) = env_name else {
@@ -60,12 +56,12 @@ pub fn load_and_merge(
         )
     })?;
 
-    let mut base_val: Value = base_content.parse().map_err(|e| {
-        anyhow::anyhow!("Failed to parse base config: {}", e)
-    })?;
-    let overlay_val: Value = overlay_content.parse().map_err(|e| {
-        anyhow::anyhow!("Failed to parse overlay config: {}", e)
-    })?;
+    let mut base_val: Value = base_content
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse base config: {}", e))?;
+    let overlay_val: Value = overlay_content
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse overlay config: {}", e))?;
 
     deep_merge(&mut base_val, overlay_val);
 
@@ -78,45 +74,51 @@ mod tests {
 
     #[test]
     fn test_deep_merge_simple() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             [project]
             name = "myapp"
             [traefik]
             image = "traefik:v3.1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             [traefik]
             image = "traefik:v3.2"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
 
-        assert_eq!(
-            base["project"]["name"].as_str().unwrap(),
-            "myapp"
-        );
-        assert_eq!(
-            base["traefik"]["image"].as_str().unwrap(),
-            "traefik:v3.2"
-        );
+        assert_eq!(base["project"]["name"].as_str().unwrap(), "myapp");
+        assert_eq!(base["traefik"]["image"].as_str().unwrap(), "traefik:v3.2");
     }
 
     #[test]
     fn test_deep_merge_nested() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             [project]
             name = "myapp"
             [[services]]
             name = "api"
             image = "api:v1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             [[services]]
             name = "api"
             image = "api:v2"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
 
@@ -128,29 +130,33 @@ mod tests {
 
     #[test]
     fn test_deep_merge_add_new_key() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             [project]
             name = "myapp"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             [project]
             name = "myapp"
             [traefik]
             image = "traefik:v3.2"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
 
-        assert_eq!(
-            base["traefik"]["image"].as_str().unwrap(),
-            "traefik:v3.2"
-        );
+        assert_eq!(base["traefik"]["image"].as_str().unwrap(), "traefik:v3.2");
     }
 
     #[test]
     fn test_deep_merge_preserves_untouched_keys() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             [project]
             name = "myapp"
             [[hosts]]
@@ -160,12 +166,17 @@ mod tests {
             name = "api"
             image = "api:v1"
             replicas = 3
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             [project]
             name = "staging-app"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
 
@@ -175,20 +186,28 @@ mod tests {
         assert_eq!(base["hosts"].as_array().unwrap().len(), 1);
         assert_eq!(base["services"].as_array().unwrap().len(), 1);
         assert_eq!(
-            base["services"].as_array().unwrap()[0]["replicas"].as_integer().unwrap(),
+            base["services"].as_array().unwrap()[0]["replicas"]
+                .as_integer()
+                .unwrap(),
             3
         );
     }
 
     #[test]
     fn test_deep_merge_scalar_override() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             value = 42
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             value = 99
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
         assert_eq!(base["value"].as_integer().unwrap(), 99);
@@ -196,13 +215,19 @@ mod tests {
 
     #[test]
     fn test_deep_merge_type_change() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             value = "string"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             value = 42
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
         assert_eq!(base["value"].as_integer().unwrap(), 42);
@@ -210,20 +235,26 @@ mod tests {
 
     #[test]
     fn test_deep_merge_deeply_nested() {
-        let mut base: Value = toml::from_str(r#"
+        let mut base: Value = toml::from_str(
+            r#"
             [a]
             [a.b]
             [a.b.c]
             value = "original"
             other = "kept"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        let overlay: Value = toml::from_str(r#"
+        let overlay: Value = toml::from_str(
+            r#"
             [a]
             [a.b]
             [a.b.c]
             value = "changed"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         deep_merge(&mut base, overlay);
         assert_eq!(base["a"]["b"]["c"]["value"].as_str().unwrap(), "changed");
@@ -234,13 +265,17 @@ mod tests {
     fn test_load_and_merge_base_only() {
         let dir = tempfile::TempDir::new().unwrap();
         let base_path = dir.path().join("korgi.toml");
-        std::fs::write(&base_path, r#"
+        std::fs::write(
+            &base_path,
+            r#"
             [project]
             name = "app"
             [[hosts]]
             name = "h1"
             address = "1.2.3.4"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let result = load_and_merge(&base_path, None).unwrap();
         assert!(result.contains("app"));
@@ -252,18 +287,26 @@ mod tests {
         let base_path = dir.path().join("korgi.toml");
         let overlay_path = dir.path().join("korgi.staging.toml");
 
-        std::fs::write(&base_path, r#"
+        std::fs::write(
+            &base_path,
+            r#"
             [project]
             name = "app"
             [[hosts]]
             name = "h1"
             address = "1.2.3.4"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        std::fs::write(&overlay_path, r#"
+        std::fs::write(
+            &overlay_path,
+            r#"
             [project]
             name = "staging-app"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let result = load_and_merge(&base_path, Some("staging")).unwrap();
         // The merged result should have the staging name
@@ -277,10 +320,14 @@ mod tests {
     fn test_load_and_merge_missing_overlay() {
         let dir = tempfile::TempDir::new().unwrap();
         let base_path = dir.path().join("korgi.toml");
-        std::fs::write(&base_path, r#"
+        std::fs::write(
+            &base_path,
+            r#"
             [project]
             name = "app"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let result = load_and_merge(&base_path, Some("production"));
         assert!(result.is_err());

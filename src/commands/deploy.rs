@@ -33,11 +33,7 @@ pub async fn run(
     if !dry_run {
         let svc_names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
         let host_count = config.node_hosts().len();
-        let msg = format!(
-            "Deploy {} to {} hosts?",
-            svc_names.join(", "),
-            host_count,
-        );
+        let msg = format!("Deploy {} to {} hosts?", svc_names.join(", "), host_count,);
         if !output::confirm(&msg, auto_yes) {
             output::info("Cancelled");
             return Ok(());

@@ -122,6 +122,9 @@ mod tests {
         mock.set_health_status(None); // No health check configured
 
         let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
-        assert!(result.is_ok(), "Container without healthcheck should be treated as healthy if running");
+        assert!(
+            result.is_ok(),
+            "Container without healthcheck should be treated as healthy if running"
+        );
     }
 }

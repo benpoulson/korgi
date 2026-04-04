@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
+use bollard::models::{
+    ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+};
 use futures::StreamExt;
 use std::collections::HashMap;
 
@@ -10,10 +12,7 @@ use crate::docker::host::DockerHost;
 
 const TRAEFIK_CONTAINER_NAME: &str = "korgi-traefik";
 
-pub async fn deploy(
-    config: &Config,
-    docker_hosts: &HashMap<String, DockerHost>,
-) -> Result<()> {
+pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>) -> Result<()> {
     let traefik = config
         .traefik
         .as_ref()
@@ -102,10 +101,7 @@ pub async fn deploy(
             host_config: Some(host_config),
             labels: Some(HashMap::from([
                 ("korgi.component".to_string(), "traefik".to_string()),
-                (
-                    "korgi.project".to_string(),
-                    config.project.name.clone(),
-                ),
+                ("korgi.project".to_string(), config.project.name.clone()),
             ])),
             ..Default::default()
         };
@@ -125,11 +121,11 @@ pub async fn deploy(
     Ok(())
 }
 
-pub async fn status(
-    config: &Config,
-    docker_hosts: &HashMap<String, DockerHost>,
-) -> Result<()> {
-    config.traefik.as_ref().context("No [traefik] section in config")?;
+pub async fn status(config: &Config, docker_hosts: &HashMap<String, DockerHost>) -> Result<()> {
+    config
+        .traefik
+        .as_ref()
+        .context("No [traefik] section in config")?;
     let traefik_hosts = config.traefik_host_names();
     for host_name in &traefik_hosts {
         let docker = docker_hosts
@@ -144,7 +140,11 @@ pub async fn status(
                     .and_then(|s| s.status.as_ref())
                     .map(|s| format!("{:?}", s))
                     .unwrap_or("unknown".to_string());
-                let image = info.config.as_ref().and_then(|c| c.image.clone()).unwrap_or_default();
+                let image = info
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.image.clone())
+                    .unwrap_or_default();
                 output::success(&format!("{}: {} ({})", host_name, state, image));
             }
             Err(_) => {
@@ -161,9 +161,14 @@ pub async fn logs(
     docker_hosts: &HashMap<String, DockerHost>,
     follow: bool,
 ) -> Result<()> {
-    config.traefik.as_ref().context("No [traefik] section in config")?;
+    config
+        .traefik
+        .as_ref()
+        .context("No [traefik] section in config")?;
     let traefik_hosts = config.traefik_host_names();
-    let host_name = traefik_hosts.first().context("No traefik hosts configured")?;
+    let host_name = traefik_hosts
+        .first()
+        .context("No traefik hosts configured")?;
     let docker = docker_hosts
         .get(host_name)
         .context(format!("No Docker connection for host {}", host_name))?;

@@ -15,10 +15,7 @@ pub const TRAEFIK_DYNAMIC_CONFIG_PATH: &str = "/etc/korgi/traefik-dynamic.yml";
 
 /// Generate Traefik dynamic YAML config for all running services.
 /// Maps each service to its backends across hosts using internal addresses and host ports.
-pub fn generate_dynamic_config(
-    config: &Config,
-    state: &LiveState,
-) -> String {
+pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
     let mut routers = Vec::new();
     let mut services = Vec::new();
 
@@ -45,15 +42,14 @@ pub fn generate_dynamic_config(
         // Router
         let mut router_yaml = format!(
             "    {}:\n      rule: \"{}\"\n      service: {}",
-            router_name,
-            routing.rule,
-            router_name,
+            router_name, routing.rule, router_name,
         );
 
         if !routing.entrypoints.is_empty() {
             router_yaml.push_str(&format!(
                 "\n      entryPoints:\n{}",
-                routing.entrypoints
+                routing
+                    .entrypoints
                     .iter()
                     .map(|ep| format!("        - {}", ep))
                     .collect::<Vec<_>>()
@@ -118,11 +114,8 @@ fn build_server_list(
     host_base: Option<u16>,
     running: &[&KorgiContainer],
 ) -> Vec<String> {
-    let host_map: HashMap<&str, &crate::config::types::HostConfig> = config
-        .hosts
-        .iter()
-        .map(|h| (h.name.as_str(), h))
-        .collect();
+    let host_map: HashMap<&str, &crate::config::types::HostConfig> =
+        config.hosts.iter().map(|h| (h.name.as_str(), h)).collect();
 
     let container_port = svc.ports.as_ref().map(|p| p.container).unwrap_or(80);
 

@@ -26,12 +26,10 @@ pub async fn rollback_service<D: DockerHostApi>(
         .current_generation(service)
         .context(format!("No running containers for service '{}'", service))?;
 
-    let rollback_gen = state
-        .rollback_generation(service)
-        .context(format!(
-            "No previous generation found to roll back to for '{}'",
-            service
-        ))?;
+    let rollback_gen = state.rollback_generation(service).context(format!(
+        "No previous generation found to roll back to for '{}'",
+        service
+    ))?;
 
     output::info(&format!(
         "Rolling back '{}' from generation {} to {}",
@@ -60,12 +58,15 @@ pub async fn rollback_service<D: DockerHostApi>(
         }
 
         // Start the stopped container
-        docker.start_container(&container.id).await.with_context(|| {
-            format!(
-                "Failed to start rollback container {} on {}",
-                container.name, container.host_name
-            )
-        })?;
+        docker
+            .start_container(&container.id)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to start rollback container {} on {}",
+                    container.name, container.host_name
+                )
+            })?;
         debug!("Started rollback container {}", container.name);
     }
     pb.finish_and_clear();
@@ -142,13 +143,27 @@ mod tests {
 
         // Gen 1: stopped (rollback target)
         web1.add_container(mock_container_summary(
-            "old-1", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::EXITED, "Exited (0)",
+            "old-1",
+            "korgi-myapp-api-g1-0",
+            "myapp",
+            "api",
+            1,
+            0,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::EXITED,
+            "Exited (0)",
         ));
         // Gen 2: running (current)
         web1.add_container(mock_container_summary(
-            "current-1", "korgi-myapp-api-g2-0", "myapp", "api", 2, 0,
-            "myapp/api:v2", ContainerSummaryStateEnum::RUNNING, "Up 5 min",
+            "current-1",
+            "korgi-myapp-api-g2-0",
+            "myapp",
+            "api",
+            2,
+            0,
+            "myapp/api:v2",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 min",
         ));
 
         // Image exists so no pull needed
@@ -160,7 +175,8 @@ mod tests {
         let calls = hosts.get("web1").unwrap().get_calls();
 
         // Should start the old container
-        let started: Vec<_> = calls.iter()
+        let started: Vec<_> = calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::StartContainer { id } => Some(id.as_str()),
                 _ => None,
@@ -169,13 +185,17 @@ mod tests {
         assert!(started.contains(&"old-1"), "Should start old gen container");
 
         // Should stop the current container
-        let stopped: Vec<_> = calls.iter()
+        let stopped: Vec<_> = calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::StopContainer { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(stopped.contains(&"current-1"), "Should stop current gen container");
+        assert!(
+            stopped.contains(&"current-1"),
+            "Should stop current gen container"
+        );
     }
 
     #[tokio::test]
@@ -185,12 +205,26 @@ mod tests {
         let web1 = MockDockerHost::new("web1");
 
         web1.add_container(mock_container_summary(
-            "old-1", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::EXITED, "Exited (0)",
+            "old-1",
+            "korgi-myapp-api-g1-0",
+            "myapp",
+            "api",
+            1,
+            0,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::EXITED,
+            "Exited (0)",
         ));
         web1.add_container(mock_container_summary(
-            "current-1", "korgi-myapp-api-g2-0", "myapp", "api", 2, 0,
-            "myapp/api:v2", ContainerSummaryStateEnum::RUNNING, "Up 5 min",
+            "current-1",
+            "korgi-myapp-api-g2-0",
+            "myapp",
+            "api",
+            2,
+            0,
+            "myapp/api:v2",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 min",
         ));
 
         // Image does NOT exist -- should be pulled
@@ -199,13 +233,17 @@ mod tests {
         rollback_service(&config, "api", &hosts).await.unwrap();
 
         let calls = hosts.get("web1").unwrap().get_calls();
-        let pulled: Vec<_> = calls.iter()
+        let pulled: Vec<_> = calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::PullImage { image } => Some(image.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(pulled.contains(&"myapp/api:v1"), "Should pull missing image");
+        assert!(
+            pulled.contains(&"myapp/api:v1"),
+            "Should pull missing image"
+        );
     }
 
     #[tokio::test]
@@ -216,14 +254,26 @@ mod tests {
 
         // Only current gen, no stopped gen to roll back to
         web1.add_container(mock_container_summary(
-            "current-1", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 min",
+            "current-1",
+            "korgi-myapp-api-g1-0",
+            "myapp",
+            "api",
+            1,
+            0,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 min",
         ));
         hosts.insert("web1".to_string(), web1);
 
         let result = rollback_service(&config, "api", &hosts).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No previous generation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No previous generation")
+        );
     }
 
     #[tokio::test]
@@ -245,18 +295,39 @@ mod tests {
 
         // Gen 1: stopped
         web1.add_container(mock_container_summary(
-            "gen1", "korgi-myapp-api-g1-0", "myapp", "api", 1, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::EXITED, "Exited (0)",
+            "gen1",
+            "korgi-myapp-api-g1-0",
+            "myapp",
+            "api",
+            1,
+            0,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::EXITED,
+            "Exited (0)",
         ));
         // Gen 2: stopped
         web1.add_container(mock_container_summary(
-            "gen2", "korgi-myapp-api-g2-0", "myapp", "api", 2, 0,
-            "myapp/api:v2", ContainerSummaryStateEnum::EXITED, "Exited (0)",
+            "gen2",
+            "korgi-myapp-api-g2-0",
+            "myapp",
+            "api",
+            2,
+            0,
+            "myapp/api:v2",
+            ContainerSummaryStateEnum::EXITED,
+            "Exited (0)",
         ));
         // Gen 3: running (current)
         web1.add_container(mock_container_summary(
-            "gen3", "korgi-myapp-api-g3-0", "myapp", "api", 3, 0,
-            "myapp/api:v3", ContainerSummaryStateEnum::RUNNING, "Up 5 min",
+            "gen3",
+            "korgi-myapp-api-g3-0",
+            "myapp",
+            "api",
+            3,
+            0,
+            "myapp/api:v3",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 min",
         ));
 
         web1.add_existing_image("myapp/api:v2");
@@ -266,13 +337,17 @@ mod tests {
 
         let calls = hosts.get("web1").unwrap().get_calls();
         // Should start gen2 (most recent stopped), not gen1
-        let started: Vec<_> = calls.iter()
+        let started: Vec<_> = calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::StartContainer { id } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(started.contains(&"gen2"), "Should roll back to most recent stopped gen (2)");
+        assert!(
+            started.contains(&"gen2"),
+            "Should roll back to most recent stopped gen (2)"
+        );
         assert!(!started.contains(&"gen1"), "Should NOT start older gen 1");
     }
 }

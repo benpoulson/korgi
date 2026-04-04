@@ -21,7 +21,10 @@ pub async fn run(config: &Config) -> Result<()> {
     }
     let lb_count = config.lb_hosts().len();
     let node_count = config.node_hosts().len();
-    output::success(&format!("{} load balancers, {} nodes", lb_count, node_count));
+    output::success(&format!(
+        "{} load balancers, {} nodes",
+        lb_count, node_count
+    ));
 
     output::header("SSH Connectivity");
     let pool = SshPool::connect_all(config).await;

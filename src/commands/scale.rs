@@ -14,7 +14,10 @@ pub async fn run(
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
     use crate::cli::output;
-    if !output::confirm(&format!("Scale '{}' to {} replicas?", service, count), auto_yes) {
+    if !output::confirm(
+        &format!("Scale '{}' to {} replicas?", service, count),
+        auto_yes,
+    ) {
         output::info("Cancelled");
         return Ok(());
     }

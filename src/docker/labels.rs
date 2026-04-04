@@ -58,10 +58,7 @@ pub fn traefik_labels(
             "true".to_string(),
         );
         labels.insert(
-            format!(
-                "traefik.http.routers.{}.tls.certresolver",
-                router_name
-            ),
+            format!("traefik.http.routers.{}.tls.certresolver", router_name),
             "letsencrypt".to_string(),
         );
     }
@@ -110,10 +107,7 @@ pub fn traefik_labels(
     }
 
     // Set the Docker network for Traefik to use
-    labels.insert(
-        "traefik.docker.network".to_string(),
-        network.to_string(),
-    );
+    labels.insert("traefik.docker.network".to_string(), network.to_string());
 
     labels
 }
@@ -183,10 +177,7 @@ pub fn generation_filter(
 
 /// Container name following the korgi convention.
 pub fn container_name(project: &str, service: &str, generation: u64, instance: u32) -> String {
-    format!(
-        "korgi-{}-{}-g{}-{}",
-        project, service, generation, instance
-    )
+    format!("korgi-{}-{}-g{}-{}", project, service, generation, instance)
 }
 
 /// Parse generation number from a container's labels.
@@ -205,16 +196,12 @@ pub fn parse_instance(labels: &HashMap<String, String>) -> Option<u32> {
 
 /// Parse service name from a container's labels.
 pub fn parse_service(labels: &HashMap<String, String>) -> Option<String> {
-    labels
-        .get(&format!("{}.service", LABEL_PREFIX))
-        .cloned()
+    labels.get(&format!("{}.service", LABEL_PREFIX)).cloned()
 }
 
 /// Parse image from a container's labels.
 pub fn parse_image(labels: &HashMap<String, String>) -> Option<String> {
-    labels
-        .get(&format!("{}.image", LABEL_PREFIX))
-        .cloned()
+    labels.get(&format!("{}.image", LABEL_PREFIX)).cloned()
 }
 
 #[cfg(test)]
@@ -224,10 +211,7 @@ mod tests {
 
     #[test]
     fn test_container_name() {
-        assert_eq!(
-            container_name("myapp", "api", 4, 0),
-            "korgi-myapp-api-g4-0"
-        );
+        assert_eq!(container_name("myapp", "api", 4, 0), "korgi-myapp-api-g4-0");
     }
 
     #[test]
@@ -270,9 +254,7 @@ mod tests {
         let labels = traefik_labels("myapp", "api", &svc, "korgi-traefik");
         assert_eq!(labels.get("traefik.enable").unwrap(), "true");
         assert_eq!(
-            labels
-                .get("traefik.http.routers.myapp-api.rule")
-                .unwrap(),
+            labels.get("traefik.http.routers.myapp-api.rule").unwrap(),
             "Host(`api.example.com`)"
         );
         assert_eq!(
@@ -282,9 +264,7 @@ mod tests {
             "websecure"
         );
         assert_eq!(
-            labels
-                .get("traefik.http.routers.myapp-api.tls")
-                .unwrap(),
+            labels.get("traefik.http.routers.myapp-api.tls").unwrap(),
             "true"
         );
         assert_eq!(
@@ -400,10 +380,7 @@ mod tests {
 
     #[test]
     fn test_container_name_various() {
-        assert_eq!(
-            container_name("app", "web", 1, 0),
-            "korgi-app-web-g1-0"
-        );
+        assert_eq!(container_name("app", "web", 1, 0), "korgi-app-web-g1-0");
         assert_eq!(
             container_name("myapp", "worker", 10, 3),
             "korgi-myapp-worker-g10-3"
@@ -446,7 +423,9 @@ mod tests {
         assert_eq!(labels.get("korgi.image").unwrap(), "myapp/api:v3");
         assert_eq!(labels.get("traefik.enable").unwrap(), "true");
         assert_eq!(
-            labels.get("traefik.http.services.proj-api.loadbalancer.server.port").unwrap(),
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.server.port")
+                .unwrap(),
             "3000"
         );
         assert_eq!(labels.get("traefik.docker.network").unwrap(), "my-net");
@@ -512,7 +491,9 @@ mod tests {
             "true"
         );
         assert_eq!(
-            labels.get("traefik.http.routers.proj-api.tls.certresolver").unwrap(),
+            labels
+                .get("traefik.http.routers.proj-api.tls.certresolver")
+                .unwrap(),
             "letsencrypt"
         );
     }
@@ -542,7 +523,9 @@ mod tests {
 
         let labels = traefik_labels("proj", "api", &svc, "net");
         assert_eq!(
-            labels.get("traefik.http.routers.proj-api.entrypoints").unwrap(),
+            labels
+                .get("traefik.http.routers.proj-api.entrypoints")
+                .unwrap(),
             "web,websecure"
         );
     }
@@ -571,7 +554,11 @@ mod tests {
         };
 
         let labels = traefik_labels("proj", "api", &svc, "net");
-        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.server.port").is_none());
+        assert!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.server.port")
+                .is_none()
+        );
     }
 
     #[test]
@@ -611,19 +598,27 @@ mod tests {
 
         let labels = traefik_labels("proj", "api", &svc, "net");
         assert_eq!(
-            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.path").unwrap(),
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.path")
+                .unwrap(),
             "/ready"
         );
         assert_eq!(
-            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.interval").unwrap(),
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.interval")
+                .unwrap(),
             "10s"
         );
         assert_eq!(
-            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.timeout").unwrap(),
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.timeout")
+                .unwrap(),
             "5s"
         );
         assert_eq!(
-            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.port").unwrap(),
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.port")
+                .unwrap(),
             "8080"
         );
     }
@@ -657,7 +652,15 @@ mod tests {
 
         let labels = traefik_labels("proj", "api", &svc, "net");
         // Should have port but no health check labels
-        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.server.port").is_some());
-        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.path").is_none());
+        assert!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.server.port")
+                .is_some()
+        );
+        assert!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.path")
+                .is_none()
+        );
     }
 }

@@ -307,8 +307,9 @@ impl Config {
     pub fn load(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?;
+        let config: Config = toml::from_str(&content).map_err(|e| {
+            anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
+        })?;
         config.validate()?;
         Ok(config)
     }
@@ -364,9 +365,10 @@ impl Config {
                 anyhow::bail!("service '{}' image cannot be empty", svc.name);
             }
             if !svc.placement_labels.is_empty() {
-                let has_matching_host = self.hosts.iter().any(|h| {
-                    svc.placement_labels.iter().all(|pl| h.labels.contains(pl))
-                });
+                let has_matching_host = self
+                    .hosts
+                    .iter()
+                    .any(|h| svc.placement_labels.iter().all(|pl| h.labels.contains(pl)));
                 if !has_matching_host {
                     anyhow::bail!(
                         "service '{}' placement_labels {:?} don't match any host",
@@ -412,11 +414,7 @@ impl Config {
         }
         self.hosts
             .iter()
-            .filter(|h| {
-                svc.placement_labels
-                    .iter()
-                    .all(|pl| h.labels.contains(pl))
-            })
+            .filter(|h| svc.placement_labels.iter().all(|pl| h.labels.contains(pl)))
             .collect()
     }
 }
@@ -863,7 +861,9 @@ mod tests {
     #[test]
     fn test_validate_duplicate_service_names() {
         let mut config = minimal_config();
-        config.services.push(ServiceConfig::test_service("api", "other:latest"));
+        config
+            .services
+            .push(ServiceConfig::test_service("api", "other:latest"));
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("duplicate service name"));
     }

@@ -78,10 +78,7 @@ rollback_keep = 2
 
 pub fn run(config_path: &Path) -> Result<()> {
     if config_path.exists() {
-        anyhow::bail!(
-            "Config file already exists: {}",
-            config_path.display()
-        );
+        anyhow::bail!("Config file already exists: {}", config_path.display());
     }
 
     std::fs::write(config_path, TEMPLATE)?;

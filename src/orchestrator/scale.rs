@@ -60,10 +60,7 @@ pub async fn scale_service<D: DockerHostApi>(
         // Scale UP: add new containers
         let add_count = target_count - current_count;
         let matching_hosts = config.matching_hosts(svc);
-        let all_placements = placement::place_replicas(
-            &matching_hosts.to_vec(),
-            target_count,
-        );
+        let all_placements = placement::place_replicas(&matching_hosts.to_vec(), target_count);
 
         // We need to create containers for instances that don't exist yet
         let existing_instances: Vec<u32> = running.iter().map(|c| c.instance).collect();
@@ -82,12 +79,8 @@ pub async fn scale_service<D: DockerHostApi>(
 
             docker.ensure_network(traefik_network).await?;
 
-            let name = labels::container_name(
-                &config.project.name,
-                service,
-                current_gen,
-                *instance,
-            );
+            let name =
+                labels::container_name(&config.project.name, service, current_gen, *instance);
 
             let container_config = containers::build_container_config(
                 &config.project.name,
@@ -180,13 +173,27 @@ mod tests {
         let mut hosts = HashMap::new();
         let web1 = MockDockerHost::new("web1");
         web1.add_container(mock_container_summary(
-            "c1", "korgi-myapp-api-g1-0", "myapp", "api", generation, 0,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes",
+            "c1",
+            "korgi-myapp-api-g1-0",
+            "myapp",
+            "api",
+            generation,
+            0,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 minutes",
         ));
         let web2 = MockDockerHost::new("web2");
         web2.add_container(mock_container_summary(
-            "c2", "korgi-myapp-api-g1-1", "myapp", "api", generation, 1,
-            "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up 5 minutes",
+            "c2",
+            "korgi-myapp-api-g1-1",
+            "myapp",
+            "api",
+            generation,
+            1,
+            "myapp/api:v1",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up 5 minutes",
         ));
         hosts.insert("web1".to_string(), web1);
         hosts.insert("web2".to_string(), web2);
@@ -200,16 +207,16 @@ mod tests {
 
         scale_service(&config, "api", 4, &hosts).await.unwrap();
 
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
         // Should create 2 new containers (scaling from 2 to 4)
-        let create_count = all_calls.iter()
+        let create_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::CreateContainer { .. }))
             .count();
         assert_eq!(create_count, 2, "Should create 2 new containers");
 
-        let start_count = all_calls.iter()
+        let start_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::StartContainer { .. }))
             .count();
         assert_eq!(start_count, 2, "Should start 2 new containers");
@@ -222,17 +229,17 @@ mod tests {
 
         scale_service(&config, "api", 1, &hosts).await.unwrap();
 
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
         // Should stop 1 container (scaling from 2 to 1)
-        let stop_count = all_calls.iter()
+        let stop_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::StopContainer { .. }))
             .count();
         assert_eq!(stop_count, 1, "Should stop 1 container");
 
         // Should remove 1 container
-        let remove_count = all_calls.iter()
+        let remove_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::RemoveContainer { .. }))
             .count();
         assert_eq!(remove_count, 1, "Should remove 1 container");
@@ -245,12 +252,18 @@ mod tests {
 
         scale_service(&config, "api", 2, &hosts).await.unwrap();
 
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
         // Should not create or stop anything
-        assert!(!all_calls.iter().any(|c| matches!(c, DockerCall::CreateContainer { .. })));
-        assert!(!all_calls.iter().any(|c| matches!(c, DockerCall::StopContainer { .. })));
+        assert!(
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::CreateContainer { .. }))
+        );
+        assert!(
+            !all_calls
+                .iter()
+                .any(|c| matches!(c, DockerCall::StopContainer { .. }))
+        );
     }
 
     #[tokio::test]
@@ -271,9 +284,15 @@ mod tests {
         // Add 3 containers: instance 0, 1, 2 all on web1
         for i in 0..3 {
             web1.add_container(mock_container_summary(
-                &format!("c{}", i), &format!("korgi-myapp-api-g1-{}", i),
-                "myapp", "api", 1, i,
-                "myapp/api:v1", ContainerSummaryStateEnum::RUNNING, "Up",
+                &format!("c{}", i),
+                &format!("korgi-myapp-api-g1-{}", i),
+                "myapp",
+                "api",
+                1,
+                i,
+                "myapp/api:v1",
+                ContainerSummaryStateEnum::RUNNING,
+                "Up",
             ));
         }
         hosts.insert("web1".to_string(), web1);
@@ -283,15 +302,22 @@ mod tests {
 
         // Should remove instance 2 and 1 (highest first), keeping instance 0
         let web1_calls = hosts.get("web1").unwrap().get_calls();
-        let stopped: Vec<_> = web1_calls.iter()
+        let stopped: Vec<_> = web1_calls
+            .iter()
             .filter_map(|c| match c {
                 DockerCall::StopContainer { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(stopped.len(), 2);
-        assert!(stopped.contains(&"c2"), "Should stop highest instance first");
-        assert!(stopped.contains(&"c1"), "Should stop second highest instance");
+        assert!(
+            stopped.contains(&"c2"),
+            "Should stop highest instance first"
+        );
+        assert!(
+            stopped.contains(&"c1"),
+            "Should stop second highest instance"
+        );
     }
 
     #[tokio::test]
@@ -301,19 +327,25 @@ mod tests {
 
         scale_service(&config, "api", 0, &hosts).await.unwrap();
 
-        let all_calls: Vec<_> = hosts.values()
-            .flat_map(|h| h.get_calls())
-            .collect();
+        let all_calls: Vec<_> = hosts.values().flat_map(|h| h.get_calls()).collect();
         // Should stop both containers
-        let stop_count = all_calls.iter()
+        let stop_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::StopContainer { .. }))
             .count();
-        assert_eq!(stop_count, 2, "Should stop all 2 containers when scaling to 0");
+        assert_eq!(
+            stop_count, 2,
+            "Should stop all 2 containers when scaling to 0"
+        );
 
         // Should remove both containers
-        let remove_count = all_calls.iter()
+        let remove_count = all_calls
+            .iter()
             .filter(|c| matches!(c, DockerCall::RemoveContainer { .. }))
             .count();
-        assert_eq!(remove_count, 2, "Should remove all 2 containers when scaling to 0");
+        assert_eq!(
+            remove_count, 2,
+            "Should remove all 2 containers when scaling to 0"
+        );
     }
 }

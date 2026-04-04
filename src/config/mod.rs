@@ -24,7 +24,9 @@ mod tests {
     fn test_load_config_basic() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("korgi.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
             [project]
             name = "test"
             [[hosts]]
@@ -33,7 +35,9 @@ mod tests {
             [[services]]
             name = "web"
             image = "web:latest"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let config = load_config(&path, None).unwrap();
         assert_eq!(config.project.name, "test");
@@ -45,7 +49,9 @@ mod tests {
         let base = dir.path().join("korgi.toml");
         let overlay = dir.path().join("korgi.staging.toml");
 
-        std::fs::write(&base, r#"
+        std::fs::write(
+            &base,
+            r#"
             [project]
             name = "prod"
             [[hosts]]
@@ -55,14 +61,20 @@ mod tests {
             name = "web"
             image = "web:v1"
             replicas = 3
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
-        std::fs::write(&overlay, r#"
+        std::fs::write(
+            &overlay,
+            r#"
             [[services]]
             name = "web"
             image = "web:v1-staging"
             replicas = 1
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let config = load_config(&base, Some("staging")).unwrap();
         // Overlay replaces services array
@@ -76,9 +88,13 @@ mod tests {
         let path = dir.path().join("korgi.toml");
 
         // SAFETY: This test runs single-threaded and we clean up the var after
-        unsafe { std::env::set_var("KORGI_TEST_DB_HOST", "db.example.com"); }
+        unsafe {
+            std::env::set_var("KORGI_TEST_DB_HOST", "db.example.com");
+        }
 
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
             [project]
             name = "test"
             [[hosts]]
@@ -89,7 +105,9 @@ mod tests {
             image = "web:latest"
             [services.env]
             DATABASE_URL = "postgres://${KORGI_TEST_DB_HOST}/mydb"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let config = load_config(&path, None).unwrap();
         assert_eq!(
@@ -98,7 +116,9 @@ mod tests {
         );
 
         // SAFETY: cleaning up test env var
-        unsafe { std::env::remove_var("KORGI_TEST_DB_HOST"); }
+        unsafe {
+            std::env::remove_var("KORGI_TEST_DB_HOST");
+        }
     }
 
     #[test]
@@ -106,7 +126,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("korgi.toml");
 
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
             [project]
             name = "test"
             [[hosts]]
@@ -117,7 +139,9 @@ mod tests {
             image = "web:latest"
             [services.env]
             SECRET = "${DEFINITELY_NOT_A_REAL_ENV_VAR_12345}"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let result = load_config(&path, None);
         assert!(result.is_err());
@@ -144,10 +168,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("korgi.toml");
         // Valid TOML but fails validation (no hosts)
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
             [project]
             name = "test"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let result = load_config(&path, None);
         assert!(result.is_err());

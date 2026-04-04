@@ -3,8 +3,8 @@ use clap::Parser;
 use std::collections::HashMap;
 use tracing_subscriber::EnvFilter;
 
-use korgi::cli::{Cli, Commands, TraefikAction};
 use korgi::cli::output;
+use korgi::cli::{Cli, Commands, TraefikAction};
 use korgi::config;
 use korgi::docker::DockerHost;
 
@@ -43,13 +43,7 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 
         Commands::Status { service } => {
             let docker_hosts = connect_docker_hosts(&cfg).await?;
-            korgi::commands::status::run(
-                &cfg,
-                service.as_deref(),
-                &docker_hosts,
-                cli.json,
-            )
-            .await?;
+            korgi::commands::status::run(&cfg, service.as_deref(), &docker_hosts, cli.json).await?;
         }
 
         Commands::Deploy {

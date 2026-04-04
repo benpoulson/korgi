@@ -1,8 +1,10 @@
-use bollard::models::{ContainerCreateBody, ContainerSummary, HostConfig, RestartPolicy, RestartPolicyNameEnum};
+use bollard::models::{
+    ContainerCreateBody, ContainerSummary, HostConfig, RestartPolicy, RestartPolicyNameEnum,
+};
 use std::collections::HashMap;
 
-use crate::config::types::ServiceConfig;
 use super::labels;
+use crate::config::types::ServiceConfig;
 
 /// Represents a running or stopped korgi-managed container.
 #[derive(Debug, Clone)]
@@ -164,11 +166,7 @@ pub fn build_container_config(
     });
 
     let host_config = HostConfig {
-        binds: if binds.is_empty() {
-            None
-        } else {
-            Some(binds)
-        },
+        binds: if binds.is_empty() { None } else { Some(binds) },
         port_bindings,
         restart_policy,
         memory,
@@ -296,10 +294,7 @@ mod tests {
 
     #[test]
     fn test_extract_health_no_health() {
-        assert_eq!(
-            extract_health_from_status(Some("Up 5 minutes")),
-            None
-        );
+        assert_eq!(extract_health_from_status(Some("Up 5 minutes")), None);
     }
 
     #[test]
@@ -404,11 +399,7 @@ mod tests {
     fn test_from_summary_image_fallback_to_summary() {
         let mut labels = valid_labels();
         labels.remove("korgi.image");
-        let summary = make_summary(
-            labels,
-            Some(ContainerSummaryStateEnum::RUNNING),
-            None,
-        );
+        let summary = make_summary(labels, Some(ContainerSummaryStateEnum::RUNNING), None);
         let container = KorgiContainer::from_summary(&summary, "web1").unwrap();
         assert_eq!(container.image, "myapp/api:v1"); // falls back to summary.image
     }
@@ -468,7 +459,10 @@ mod tests {
     fn test_build_container_config_with_env() {
         let svc = ServiceConfig::test_service("api", "api:v1");
         let mut env = HashMap::new();
-        env.insert("DATABASE_URL".to_string(), "postgres://localhost/db".to_string());
+        env.insert(
+            "DATABASE_URL".to_string(),
+            "postgres://localhost/db".to_string(),
+        );
         env.insert("REDIS_URL".to_string(), "redis://localhost".to_string());
 
         let config = build_container_config("proj", &svc, 1, 0, "net", &env, None);
@@ -528,25 +522,28 @@ mod tests {
             svc.restart = policy_str.to_string();
             let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
             let restart = config.host_config.unwrap().restart_policy.unwrap();
-            assert_eq!(restart.name, Some(expected), "Failed for policy: {}", policy_str);
+            assert_eq!(
+                restart.name,
+                Some(expected),
+                "Failed for policy: {}",
+                policy_str
+            );
         }
     }
 
     #[test]
     fn test_build_container_config_with_command_and_entrypoint() {
         let mut svc = ServiceConfig::test_service("api", "api:v1");
-        svc.command = Some(vec!["serve".to_string(), "--port".to_string(), "8080".to_string()]);
+        svc.command = Some(vec![
+            "serve".to_string(),
+            "--port".to_string(),
+            "8080".to_string(),
+        ]);
         svc.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
 
         let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
-        assert_eq!(
-            config.cmd.unwrap(),
-            vec!["serve", "--port", "8080"]
-        );
-        assert_eq!(
-            config.entrypoint.unwrap(),
-            vec!["/bin/sh", "-c"]
-        );
+        assert_eq!(config.cmd.unwrap(), vec!["serve", "--port", "8080"]);
+        assert_eq!(config.entrypoint.unwrap(), vec!["/bin/sh", "-c"]);
     }
 
     #[test]
@@ -563,7 +560,8 @@ mod tests {
             host_base: None,
         });
 
-        let config = build_container_config("myapp", &svc, 5, 0, "korgi-traefik", &HashMap::new(), None);
+        let config =
+            build_container_config("myapp", &svc, 5, 0, "korgi-traefik", &HashMap::new(), None);
         let labels = config.labels.unwrap();
         assert_eq!(labels.get("traefik.enable").unwrap(), "true");
         assert_eq!(

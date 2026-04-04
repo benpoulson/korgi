@@ -2,10 +2,7 @@ use crate::config::types::HostConfig;
 
 /// Compute placement: distribute N replicas across matching hosts using round-robin.
 /// Returns a vec of (host_name, instance_index) pairs.
-pub fn place_replicas<'a>(
-    hosts: &[&'a HostConfig],
-    replicas: u32,
-) -> Vec<(&'a HostConfig, u32)> {
+pub fn place_replicas<'a>(hosts: &[&'a HostConfig], replicas: u32) -> Vec<(&'a HostConfig, u32)> {
     if hosts.is_empty() {
         return Vec::new();
     }

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::config::types::{Config, HostConfig};
 use super::session::SshSession;
+use crate::config::types::{Config, HostConfig};
 
 /// Pool of SSH connections, one per configured host.
 pub struct SshPool {

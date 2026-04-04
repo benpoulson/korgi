@@ -18,11 +18,7 @@ pub trait DockerHostApi: Send + Sync {
 
     async fn pull_image(&self, image: &str, auth: Option<DockerCredentials>) -> Result<()>;
 
-    async fn create_container(
-        &self,
-        name: &str,
-        config: ContainerCreateBody,
-    ) -> Result<String>;
+    async fn create_container(&self, name: &str, config: ContainerCreateBody) -> Result<String>;
 
     async fn start_container(&self, id: &str) -> Result<()>;
 

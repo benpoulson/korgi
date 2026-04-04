@@ -4,7 +4,11 @@ use std::path::PathBuf;
 pub mod output;
 
 #[derive(Parser, Debug)]
-#[command(name = "korgi", version, about = "Docker orchestration across multiple hosts via SSH")]
+#[command(
+    name = "korgi",
+    version,
+    about = "Docker orchestration across multiple hosts via SSH"
+)]
 pub struct Cli {
     /// Path to korgi.toml config file
     #[arg(long, short, default_value = "korgi.toml")]
@@ -183,7 +187,13 @@ mod tests {
     #[test]
     fn test_deploy_with_options() {
         let cli = parse(&[
-            "korgi", "deploy", "--service", "api", "--image", "myapp:v2", "--dry-run",
+            "korgi",
+            "deploy",
+            "--service",
+            "api",
+            "--image",
+            "myapp:v2",
+            "--dry-run",
         ]);
         match &cli.command {
             Commands::Deploy {
@@ -256,7 +266,16 @@ mod tests {
 
     #[test]
     fn test_exec() {
-        let cli = parse(&["korgi", "exec", "--service", "api", "--", "sh", "-c", "echo hello"]);
+        let cli = parse(&[
+            "korgi",
+            "exec",
+            "--service",
+            "api",
+            "--",
+            "sh",
+            "-c",
+            "echo hello",
+        ]);
         match &cli.command {
             Commands::Exec { service, cmd } => {
                 assert_eq!(service, "api");
@@ -299,10 +318,7 @@ mod tests {
     #[test]
     fn test_global_config() {
         let cli = parse(&["korgi", "--config", "/path/to/config.toml", "check"]);
-        assert_eq!(
-            cli.config,
-            std::path::PathBuf::from("/path/to/config.toml")
-        );
+        assert_eq!(cli.config, std::path::PathBuf::from("/path/to/config.toml"));
     }
 
     #[test]

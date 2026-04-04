@@ -44,18 +44,17 @@ pub async fn sync_traefik_config(
     // Write to each Traefik host's container
     for host_name in &traefik_hosts {
         let Some(docker) = docker_hosts.get(host_name) else {
-            debug!("No Docker connection for Traefik host {}, skipping", host_name);
+            debug!(
+                "No Docker connection for Traefik host {}, skipping",
+                host_name
+            );
             continue;
         };
 
         // Check if Traefik container is running
         match docker.inspect_container(TRAEFIK_CONTAINER_NAME).await {
             Ok(info) => {
-                let running = info
-                    .state
-                    .as_ref()
-                    .and_then(|s| s.running)
-                    .unwrap_or(false);
+                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
                 if !running {
                     output::warn(&format!(
                         "Traefik not running on {}, skipping config sync",
@@ -79,7 +78,14 @@ pub async fn sync_traefik_config(
         docker
             .exec_in_container(
                 TRAEFIK_CONTAINER_NAME,
-                &["sh", "-c", &format!("mkdir -p {} && printf '%s' '{}' > {}", CONFIG_DIR, escaped, CONFIG_FILE)],
+                &[
+                    "sh",
+                    "-c",
+                    &format!(
+                        "mkdir -p {} && printf '%s' '{}' > {}",
+                        CONFIG_DIR, escaped, CONFIG_FILE
+                    ),
+                ],
             )
             .await
             .with_context(|| format!("Failed to write Traefik config on {}", host_name))?;

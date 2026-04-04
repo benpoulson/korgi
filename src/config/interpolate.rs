@@ -152,16 +152,16 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("A".to_string(), "hello".to_string());
         env.insert("B".to_string(), "world".to_string());
-        assert_eq!(
-            interpolate_str("${A}${B}", &env).unwrap(),
-            "helloworld"
-        );
+        assert_eq!(interpolate_str("${A}${B}", &env).unwrap(), "helloworld");
     }
 
     #[test]
     fn test_var_with_special_chars_in_value() {
         let mut env = HashMap::new();
-        env.insert("URL".to_string(), "postgres://user:p@ss${word@host/db".to_string());
+        env.insert(
+            "URL".to_string(),
+            "postgres://user:p@ss${word@host/db".to_string(),
+        );
         assert_eq!(
             interpolate_str("${URL}", &env).unwrap(),
             "postgres://user:p@ss${word@host/db"
