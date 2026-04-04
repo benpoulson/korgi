@@ -52,11 +52,19 @@ fn load_secrets_from_raw_toml(
             .join(secrets_path)
     };
 
-    // File is optional -- if it doesn't exist, just return empty map.
-    // Secrets are only needed if ${VAR} references can't resolve from system env.
     let content = match std::fs::read_to_string(&secrets_file) {
-        Ok(c) => c,
-        Err(_) => return Ok(secrets),
+        Ok(c) => {
+            tracing::debug!("Loaded secrets from {}", secrets_file.display());
+            c
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Secrets file '{}' not found ({}). Variables will resolve from system env only.",
+                secrets_file.display(),
+                e
+            );
+            return Ok(secrets);
+        }
     };
 
     for line in content.lines() {
