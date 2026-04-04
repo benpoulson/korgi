@@ -41,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
 
       # Cross-compilation toolchain for Linux ARM64
       - name: Install cross-compilation tools
