@@ -7,10 +7,15 @@ const TEMPLATE: &str = r#"[project]
 name = "myapp"
 # secrets = ".korgi-secrets"       # KEY=VALUE file, loaded before ${VAR} interpolation
 
+# GitHub Container Registry (shorthand)
 # [[registries]]
-# url = "ghcr.io"
-# username = "${GHCR_USER}"
-# password = "${GHCR_TOKEN}"
+# github_token = "${GH_TOKEN}"
+
+# Other registries
+# [[registries]]
+# url = "registry.example.com"
+# username = "${REGISTRY_USER}"
+# password = "${REGISTRY_PASSWORD}"
 
 # --- Load balancer (runs Traefik, faces the internet) ---
 [[hosts]]

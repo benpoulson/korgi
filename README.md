@@ -343,13 +343,42 @@ DATABASE_URL = "${DATABASE_URL}"
 
 Unset variables cause a hard error -- Korgi never deploys with empty credentials. Variables in TOML comments are ignored.
 
+### Secrets File
+
+Keep sensitive values out of your environment by pointing to a secrets file:
+
+```toml
+[project]
+name = "myapp"
+secrets = ".korgi-secrets"
+```
+
+The file uses `KEY=VALUE` format (comments with `#`, blank lines ignored):
+
+```
+DB_PASSWORD=hunter2
+JWT_SECRET=supersecret
+GH_TOKEN=ghp_abc123
+```
+
+The file is optional -- if it doesn't exist, Korgi falls back to system env vars. System env always takes precedence over the secrets file. Add the file to your `.gitignore`.
+
 ### Private Registries
+
+GitHub Container Registry shorthand:
 
 ```toml
 [[registries]]
-url = "ghcr.io"
-username = "${GHCR_USER}"
-password = "${GHCR_TOKEN}"
+github_token = "${GH_TOKEN}"
+```
+
+Other registries:
+
+```toml
+[[registries]]
+url = "registry.example.com"
+username = "${REGISTRY_USER}"
+password = "${REGISTRY_PASSWORD}"
 ```
 
 ### Resource Limits

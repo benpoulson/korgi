@@ -7,13 +7,13 @@ pub fn credentials_for_image(
     image: &str,
     registries: &[RegistryConfig],
 ) -> Option<DockerCredentials> {
-    // Match the image's registry prefix against configured registries
     for reg in registries {
-        if image.starts_with(&reg.url) {
+        let url = reg.resolved_url();
+        if !url.is_empty() && image.starts_with(url) {
             return Some(DockerCredentials {
-                username: reg.username.clone(),
-                password: reg.password.clone(),
-                serveraddress: Some(reg.url.clone()),
+                username: reg.resolved_username().map(|s| s.to_string()),
+                password: reg.resolved_password().map(|s| s.to_string()),
+                serveraddress: Some(url.to_string()),
                 ..Default::default()
             });
         }
@@ -28,14 +28,16 @@ mod tests {
     fn test_registries() -> Vec<RegistryConfig> {
         vec![
             RegistryConfig {
-                url: "ghcr.io".to_string(),
+                url: Some("ghcr.io".to_string()),
                 username: Some("user1".to_string()),
                 password: Some("pass1".to_string()),
+                github_token: None,
             },
             RegistryConfig {
-                url: "registry.example.com".to_string(),
+                url: Some("registry.example.com".to_string()),
                 username: Some("user2".to_string()),
                 password: Some("pass2".to_string()),
+                github_token: None,
             },
         ]
     }
@@ -82,12 +84,41 @@ mod tests {
     #[test]
     fn test_registry_without_credentials() {
         let regs = vec![RegistryConfig {
-            url: "ghcr.io".to_string(),
+            url: Some("ghcr.io".to_string()),
             username: None,
             password: None,
+            github_token: None,
         }];
         let creds = credentials_for_image("ghcr.io/myapp:latest", &regs);
         assert!(creds.is_some());
         assert_eq!(creds.as_ref().unwrap().username, None);
+    }
+
+    #[test]
+    fn test_github_token_shorthand() {
+        let regs = vec![RegistryConfig {
+            url: None,
+            username: None,
+            password: None,
+            github_token: Some("ghp_abc123".to_string()),
+        }];
+        let creds = credentials_for_image("ghcr.io/myorg/myapp:latest", &regs);
+        assert!(creds.is_some());
+        let creds = creds.unwrap();
+        assert_eq!(creds.username, Some("token".to_string()));
+        assert_eq!(creds.password, Some("ghp_abc123".to_string()));
+        assert_eq!(creds.serveraddress, Some("ghcr.io".to_string()));
+    }
+
+    #[test]
+    fn test_github_token_no_match_non_ghcr() {
+        let regs = vec![RegistryConfig {
+            url: None,
+            username: None,
+            password: None,
+            github_token: Some("ghp_abc123".to_string()),
+        }];
+        let creds = credentials_for_image("docker.io/nginx:latest", &regs);
+        assert!(creds.is_none());
     }
 }

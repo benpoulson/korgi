@@ -12,7 +12,7 @@ The repo is named `kargo` but the binary/tool is named `korgi`.
 
 ```sh
 cargo build           # build
-cargo test            # run all 224 unit tests
+cargo test            # run all 232 unit tests
 cargo clippy          # lint
 cargo fmt             # format
 RUST_LOG=debug cargo run -- status  # run with debug logging
@@ -85,8 +85,10 @@ Old generation is never touched until new is confirmed healthy. Health failure t
 - **Hosts**: `role` (`lb`/`node`, default `node`), `address` (SSH), `internal_address` (routing), `port` (SSH port, default 22), `labels` (placement targeting)
 - **Services**: `placement_labels` controls which hosts get containers. `host_base` in `[services.ports]` allocates sequential host ports for cross-host routing
 - **Traefik**: `hosts` lists which hosts run Traefik (typically just the LB). File provider is enabled automatically
+- **Registries**: `github_token` shorthand for GHCR (auto-fills url/username), or explicit `url`/`username`/`password` for other registries
+- **Secrets**: `project.secrets` points to a KEY=VALUE file loaded before interpolation. Optional -- missing file is silently skipped. System env takes precedence
 - **Overlays**: `korgi.<env>.toml` deep-merged over base via `--env`
-- **Interpolation**: `${VAR}` from system environment (strict -- unset vars are errors, comment lines skipped)
+- **Interpolation**: `${VAR}` resolved from secrets file + system env (strict -- unset vars are errors, comment lines skipped)
 - **Validation**: duplicate service names rejected, placement labels must match at least one host, traefik host refs validated
 
 ## Conventions

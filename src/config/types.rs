@@ -26,11 +26,44 @@ pub struct ProjectConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryConfig {
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// Shorthand for GHCR: sets url=ghcr.io, username=token, password=this value.
+    #[serde(default)]
+    pub github_token: Option<String>,
+}
+
+impl RegistryConfig {
+    /// Resolved URL (ghcr.io if using github_token shorthand).
+    pub fn resolved_url(&self) -> &str {
+        if self.github_token.is_some() {
+            "ghcr.io"
+        } else {
+            self.url.as_deref().unwrap_or("")
+        }
+    }
+
+    /// Resolved username.
+    pub fn resolved_username(&self) -> Option<&str> {
+        if self.github_token.is_some() {
+            Some("token")
+        } else {
+            self.username.as_deref()
+        }
+    }
+
+    /// Resolved password.
+    pub fn resolved_password(&self) -> Option<&str> {
+        if let Some(token) = &self.github_token {
+            Some(token.as_str())
+        } else {
+            self.password.as_deref()
+        }
+    }
 }
 
 /// Host role: load balancer (runs Traefik) or node (runs containers).
