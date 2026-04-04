@@ -7,12 +7,70 @@ pub use types::Config;
 /// Resolve and load configuration, applying environment overlay and interpolation.
 pub fn load_config(config_path: &std::path::Path, env: Option<&str>) -> anyhow::Result<Config> {
     let merged_toml = merge::load_and_merge(config_path, env)?;
-    let sys_env = interpolate::system_env();
-    let interpolated = interpolate::interpolate_str(&merged_toml, &sys_env)?;
+
+    // Build env map: secrets file (if configured) overlaid with system env vars.
+    // System env takes precedence over the secrets file.
+    let mut env_map = load_secrets_from_raw_toml(&merged_toml, config_path)?;
+    env_map.extend(interpolate::system_env());
+
+    let interpolated = interpolate::interpolate_str(&merged_toml, &env_map)?;
     let config: Config = toml::from_str(&interpolated)
         .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
     config.validate()?;
     Ok(config)
+}
+
+/// Extract project.secrets path from raw TOML and load the secrets file if it exists.
+/// The secrets file format is KEY=VALUE per line (blank lines and # comments ignored).
+fn load_secrets_from_raw_toml(
+    raw_toml: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut secrets = std::collections::HashMap::new();
+
+    // Quick parse to extract just the secrets path -- don't interpolate yet
+    let raw: toml::Value = raw_toml
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+
+    let secrets_path = raw
+        .get("project")
+        .and_then(|p| p.get("secrets"))
+        .and_then(|s| s.as_str());
+
+    let Some(secrets_path) = secrets_path else {
+        return Ok(secrets);
+    };
+
+    // Resolve relative to the config file's directory
+    let secrets_file = if std::path::Path::new(secrets_path).is_absolute() {
+        std::path::PathBuf::from(secrets_path)
+    } else {
+        config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(secrets_path)
+    };
+
+    let content = std::fs::read_to_string(&secrets_file).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read secrets file '{}': {}",
+            secrets_file.display(),
+            e
+        )
+    })?;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            secrets.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+
+    Ok(secrets)
 }
 
 #[cfg(test)]
@@ -179,5 +237,109 @@ mod tests {
 
         let result = load_config(&path, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_with_secrets_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("korgi.toml");
+        let secrets = dir.path().join("secrets");
+
+        std::fs::write(
+            &secrets,
+            "DB_PASSWORD=hunter2\n# comment\nJWT_SECRET=supersecret\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            &path,
+            r#"
+            [project]
+            name = "test"
+            secrets = "secrets"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "web"
+            image = "web:latest"
+            [services.env]
+            DB_PASSWORD = "${DB_PASSWORD}"
+            JWT_SECRET = "${JWT_SECRET}"
+        "#,
+        )
+        .unwrap();
+
+        let config = load_config(&path, None).unwrap();
+        assert_eq!(
+            config.services[0].env.get("DB_PASSWORD").unwrap(),
+            "hunter2"
+        );
+        assert_eq!(
+            config.services[0].env.get("JWT_SECRET").unwrap(),
+            "supersecret"
+        );
+    }
+
+    #[test]
+    fn test_secrets_file_system_env_takes_precedence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("korgi.toml");
+        let secrets = dir.path().join("secrets");
+
+        std::fs::write(&secrets, "KORGI_TEST_OVERRIDE=from_file\n").unwrap();
+
+        // SAFETY: test env var
+        unsafe {
+            std::env::set_var("KORGI_TEST_OVERRIDE", "from_env");
+        }
+
+        std::fs::write(
+            &path,
+            r#"
+            [project]
+            name = "test"
+            secrets = "secrets"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "web"
+            image = "web:latest"
+            [services.env]
+            VAL = "${KORGI_TEST_OVERRIDE}"
+        "#,
+        )
+        .unwrap();
+
+        let config = load_config(&path, None).unwrap();
+        assert_eq!(config.services[0].env.get("VAL").unwrap(), "from_env");
+
+        unsafe {
+            std::env::remove_var("KORGI_TEST_OVERRIDE");
+        }
+    }
+
+    #[test]
+    fn test_secrets_file_missing_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("korgi.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+            [project]
+            name = "test"
+            secrets = "nonexistent"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+        "#,
+        )
+        .unwrap();
+
+        let result = load_config(&path, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("secrets file"));
     }
 }

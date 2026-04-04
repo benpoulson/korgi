@@ -71,12 +71,8 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
             if traefik.entrypoints.contains_key("web")
                 && traefik.entrypoints.contains_key("websecure")
             {
-                cmd.push(
-                    "--entrypoints.web.http.redirections.entrypoint.to=websecure".to_string(),
-                );
-                cmd.push(
-                    "--entrypoints.web.http.redirections.entrypoint.scheme=https".to_string(),
-                );
+                cmd.push("--entrypoints.web.http.redirections.entrypoint.to=websecure".to_string());
+                cmd.push("--entrypoints.web.http.redirections.entrypoint.scheme=https".to_string());
             }
         }
 

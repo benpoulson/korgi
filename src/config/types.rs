@@ -18,6 +18,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: String,
+    /// Path to a secrets file (KEY=VALUE per line). Loaded before ${VAR} interpolation.
+    /// System env vars take precedence over values in this file.
+    #[serde(default)]
+    pub secrets: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +431,7 @@ mod tests {
         Config {
             project: ProjectConfig {
                 name: "myapp".to_string(),
+                secrets: None,
             },
             registries: vec![],
             hosts: vec![{

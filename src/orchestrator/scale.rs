@@ -139,6 +139,7 @@ mod tests {
         Config {
             project: ProjectConfig {
                 name: "myapp".to_string(),
+                secrets: None,
             },
             registries: vec![],
             hosts: vec![

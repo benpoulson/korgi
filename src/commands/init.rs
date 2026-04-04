@@ -5,6 +5,7 @@ use crate::cli::output;
 
 const TEMPLATE: &str = r#"[project]
 name = "myapp"
+# secrets = ".korgi-secrets"       # KEY=VALUE file, loaded before ${VAR} interpolation
 
 # [[registries]]
 # url = "ghcr.io"
