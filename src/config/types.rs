@@ -32,9 +32,16 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostConfig {
     pub name: String,
+    /// Public/external address -- used for SSH connections.
     pub address: String,
+    /// Internal/private address -- used for Traefik load balancing and inter-host traffic.
+    /// Falls back to `address` if not set.
+    #[serde(default)]
+    pub internal_address: Option<String>,
     #[serde(default = "default_ssh_user")]
     pub user: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
     #[serde(default)]
     pub ssh_key: Option<String>,
     #[serde(default)]
@@ -43,8 +50,40 @@ pub struct HostConfig {
     pub docker_socket: Option<String>,
 }
 
+impl HostConfig {
+    /// Returns the address to use for SSH connections (public/external).
+    pub fn ssh_address(&self) -> &str {
+        &self.address
+    }
+
+    /// Returns the address to use for internal traffic (Traefik, service-to-service).
+    /// Falls back to the SSH address if no internal address is configured.
+    pub fn internal_addr(&self) -> &str {
+        self.internal_address.as_deref().unwrap_or(&self.address)
+    }
+
+    /// Helper to build a minimal HostConfig for testing.
+    #[cfg(test)]
+    pub fn test_host(name: &str, address: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            address: address.to_string(),
+            internal_address: None,
+            user: "deploy".to_string(),
+            port: 22,
+            ssh_key: None,
+            labels: vec![],
+            docker_socket: None,
+        }
+    }
+}
+
 fn default_ssh_user() -> String {
     "root".to_string()
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +195,11 @@ pub struct PortsConfig {
     pub container: u16,
     #[serde(default)]
     pub host: Option<u16>,
+    /// Base port for auto-allocated host port bindings across replicas.
+    /// Instance 0 gets host_base, instance 1 gets host_base+1, etc.
+    /// Required for cross-host load balancing via Traefik file provider.
+    #[serde(default)]
+    pub host_base: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,7 +250,35 @@ impl Default for DeployConfig {
     }
 }
 
+impl ServiceConfig {
+    /// Helper to build a minimal ServiceConfig for testing.
+    #[cfg(test)]
+    pub fn test_service(name: &str, image: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            image: image.to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: None,
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        }
+    }
+}
+
 impl Config {
+    /// Find a service config by name.
+    pub fn find_service(&self, name: &str) -> Option<&ServiceConfig> {
+        self.services.iter().find(|s| s.name == name)
+    }
+
     pub fn load(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
@@ -238,6 +310,13 @@ impl Config {
                 if !host_names.contains(&th.as_str()) {
                     anyhow::bail!("traefik references unknown host '{}'", th);
                 }
+            }
+        }
+        // Validate no duplicate service names
+        let mut seen_services = std::collections::HashSet::new();
+        for svc in &self.services {
+            if !seen_services.insert(&svc.name) {
+                anyhow::bail!("duplicate service name '{}'", svc.name);
             }
         }
         // Validate service placement labels exist on at least one host
@@ -282,5 +361,517 @@ impl Config {
                     .all(|pl| h.labels.contains(pl))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config() -> Config {
+        Config {
+            project: ProjectConfig {
+                name: "myapp".to_string(),
+            },
+            registries: vec![],
+            hosts: vec![{
+                let mut h = HostConfig::test_host("web1", "192.168.1.10");
+                h.labels = vec!["web".to_string()];
+                h
+            }],
+            traefik: None,
+            services: vec![ServiceConfig::test_service("api", "myapp/api:latest")],
+        }
+    }
+
+    // --- Config Parsing from TOML ---
+
+    #[test]
+    fn test_parse_minimal_toml() {
+        let toml_str = r#"
+            [project]
+            name = "myapp"
+
+            [[hosts]]
+            name = "web1"
+            address = "10.0.0.1"
+
+            [[services]]
+            name = "api"
+            image = "api:latest"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.project.name, "myapp");
+        assert_eq!(config.hosts.len(), 1);
+        assert_eq!(config.hosts[0].user, "root"); // default
+        assert_eq!(config.services.len(), 1);
+        assert_eq!(config.services[0].replicas, 1); // default
+        assert_eq!(config.services[0].restart, "unless-stopped"); // default
+    }
+
+    #[test]
+    fn test_parse_full_toml() {
+        let toml_str = r#"
+            [project]
+            name = "fullapp"
+
+            [[registries]]
+            url = "ghcr.io"
+            username = "user"
+            password = "pass"
+
+            [[hosts]]
+            name = "web1"
+            address = "10.0.0.1"
+            user = "deploy"
+            ssh_key = "~/.ssh/id_ed25519"
+            labels = ["web", "primary"]
+            docker_socket = "/var/run/docker.sock"
+
+            [[hosts]]
+            name = "web2"
+            address = "10.0.0.2"
+            user = "deploy"
+            labels = ["web"]
+
+            [traefik]
+            image = "traefik:v3.2"
+            hosts = ["web1", "web2"]
+            network = "my-network"
+
+            [traefik.acme]
+            email = "admin@example.com"
+
+            [[services]]
+            name = "api"
+            image = "myapp/api:v1"
+            replicas = 3
+            placement_labels = ["web"]
+            command = ["serve"]
+            entrypoint = ["/bin/sh", "-c"]
+            restart = "always"
+
+            [services.health]
+            path = "/health"
+            interval = "10s"
+            timeout = "5s"
+            retries = 5
+            start_period = "15s"
+
+            [services.routing]
+            rule = "Host(`api.example.com`)"
+            entrypoints = ["websecure"]
+            tls = true
+
+            [services.env]
+            DATABASE_URL = "postgres://localhost/db"
+
+            [services.ports]
+            container = 8080
+            host = 9090
+
+            [[services.volumes]]
+            host = "/data"
+            container = "/app/data"
+            readonly = true
+
+            [services.resources]
+            memory = "512m"
+            cpus = "1.5"
+
+            [services.deploy]
+            drain_seconds = 60
+            start_delay = 10
+            rollback_keep = 3
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.project.name, "fullapp");
+        assert_eq!(config.registries.len(), 1);
+        assert_eq!(config.hosts.len(), 2);
+        assert_eq!(config.hosts[0].labels.len(), 2);
+        assert!(config.traefik.is_some());
+        let traefik = config.traefik.as_ref().unwrap();
+        assert_eq!(traefik.network, "my-network");
+        assert!(traefik.acme.is_some());
+        let svc = &config.services[0];
+        assert_eq!(svc.replicas, 3);
+        assert_eq!(svc.command.as_ref().unwrap(), &vec!["serve".to_string()]);
+        assert_eq!(svc.restart, "always");
+        let health = svc.health.as_ref().unwrap();
+        assert_eq!(health.path, "/health");
+        assert_eq!(health.retries, 5);
+        assert_eq!(health.start_period.as_ref().unwrap(), "15s");
+        let routing = svc.routing.as_ref().unwrap();
+        assert!(routing.tls);
+        assert_eq!(routing.entrypoints, vec!["websecure"]);
+        let ports = svc.ports.as_ref().unwrap();
+        assert_eq!(ports.container, 8080);
+        assert_eq!(ports.host, Some(9090));
+        assert_eq!(svc.volumes.len(), 1);
+        assert!(svc.volumes[0].readonly);
+        let resources = svc.resources.as_ref().unwrap();
+        assert_eq!(resources.memory.as_ref().unwrap(), "512m");
+        let deploy = svc.deploy.as_ref().unwrap();
+        assert_eq!(deploy.drain_seconds, 60);
+        assert_eq!(deploy.rollback_keep, 3);
+    }
+
+    #[test]
+    fn test_parse_defaults() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "web"
+            image = "web:latest"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let svc = &config.services[0];
+        assert_eq!(svc.replicas, 1);
+        assert_eq!(svc.restart, "unless-stopped");
+        assert!(svc.health.is_none());
+        assert!(svc.routing.is_none());
+        assert!(svc.deploy.is_none());
+        assert!(svc.env.is_empty());
+        assert!(svc.volumes.is_empty());
+    }
+
+    #[test]
+    fn test_traefik_defaults() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [traefik]
+            hosts = ["h1"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let traefik = config.traefik.unwrap();
+        assert_eq!(traefik.image, "traefik:v3.2");
+        assert_eq!(traefik.network, "korgi-traefik");
+        assert!(traefik.acme.is_none());
+    }
+
+    #[test]
+    fn test_health_defaults() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "web"
+            image = "web:latest"
+            [services.health]
+            path = "/ready"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let health = config.services[0].health.as_ref().unwrap();
+        assert_eq!(health.interval, "5s");
+        assert_eq!(health.timeout, "3s");
+        assert_eq!(health.retries, 3);
+        assert!(health.start_period.is_none());
+    }
+
+    // --- Validation ---
+
+    #[test]
+    fn test_validate_empty_project_name() {
+        let mut config = minimal_config();
+        config.project.name = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_no_hosts() {
+        let mut config = minimal_config();
+        config.hosts.clear();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_host_name() {
+        let mut config = minimal_config();
+        config.hosts[0].name = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_host_address() {
+        let mut config = minimal_config();
+        config.hosts[0].address = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_service_name() {
+        let mut config = minimal_config();
+        config.services[0].name = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_service_image() {
+        let mut config = minimal_config();
+        config.services[0].image = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_traefik_references_unknown_host() {
+        let mut config = minimal_config();
+        config.traefik = Some(TraefikConfig {
+            image: "traefik:v3.2".to_string(),
+            hosts: vec!["nonexistent".to_string()],
+            entrypoints: HashMap::new(),
+            network: "korgi-traefik".to_string(),
+            acme: None,
+        });
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown host"));
+    }
+
+    #[test]
+    fn test_validate_traefik_references_valid_host() {
+        let mut config = minimal_config();
+        config.traefik = Some(TraefikConfig {
+            image: "traefik:v3.2".to_string(),
+            hosts: vec!["web1".to_string()],
+            entrypoints: HashMap::new(),
+            network: "korgi-traefik".to_string(),
+            acme: None,
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_placement_labels_no_match() {
+        let mut config = minimal_config();
+        config.services[0].placement_labels = vec!["gpu".to_string()];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("placement_labels"));
+        assert!(err.to_string().contains("gpu"));
+    }
+
+    #[test]
+    fn test_validate_placement_labels_match() {
+        let mut config = minimal_config();
+        config.services[0].placement_labels = vec!["web".to_string()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_placement_labels_partial_match() {
+        // Service requires ["web", "gpu"] but host only has ["web"]
+        let mut config = minimal_config();
+        config.services[0].placement_labels = vec!["web".to_string(), "gpu".to_string()];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_multiple_hosts_one_matches() {
+        let mut config = minimal_config();
+        let mut gpu = HostConfig::test_host("gpu1", "10.0.0.2");
+        gpu.labels = vec!["gpu".to_string()];
+        config.hosts.push(gpu);
+        config.services[0].placement_labels = vec!["gpu".to_string()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_services_ok() {
+        let mut config = minimal_config();
+        config.services.clear();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- matching_hosts ---
+
+    #[test]
+    fn test_matching_hosts_no_labels_matches_all() {
+        let config = minimal_config();
+        let svc = ServiceConfig::test_service("test", "img:latest");
+        let hosts = config.matching_hosts(&svc);
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn test_matching_hosts_with_labels() {
+        let mut config = minimal_config();
+        let mut gpu = HostConfig::test_host("gpu1", "10.0.0.2");
+        gpu.labels = vec!["gpu".to_string()];
+        config.hosts.push(gpu);
+        let mut svc = ServiceConfig::test_service("test", "img:latest");
+        svc.placement_labels = vec!["gpu".to_string()];
+        let hosts = config.matching_hosts(&svc);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].name, "gpu1");
+    }
+
+    #[test]
+    fn test_matching_hosts_multiple_labels_all_required() {
+        let mut config = minimal_config();
+        config.hosts[0].labels = vec!["web".to_string(), "primary".to_string()];
+        let mut web2 = HostConfig::test_host("web2", "10.0.0.2");
+        web2.labels = vec!["web".to_string()];
+        config.hosts.push(web2);
+        let mut svc = ServiceConfig::test_service("test", "img:latest");
+        svc.placement_labels = vec!["web".to_string(), "primary".to_string()];
+        let hosts = config.matching_hosts(&svc);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].name, "web1");
+    }
+
+    // --- deploy_config ---
+
+    #[test]
+    fn test_deploy_config_defaults() {
+        let svc = ServiceConfig::test_service("test", "img:latest");
+        let deploy = Config::deploy_config(&svc);
+        assert_eq!(deploy.drain_seconds, 30);
+        assert_eq!(deploy.start_delay, 5);
+        assert_eq!(deploy.rollback_keep, 2);
+    }
+
+    #[test]
+    fn test_deploy_config_custom() {
+        let mut svc = ServiceConfig::test_service("test", "img:latest");
+        svc.deploy = Some(DeployConfig {
+            drain_seconds: 120,
+            start_delay: 15,
+            rollback_keep: 5,
+        });
+        let deploy = Config::deploy_config(&svc);
+        assert_eq!(deploy.drain_seconds, 120);
+        assert_eq!(deploy.start_delay, 15);
+        assert_eq!(deploy.rollback_keep, 5);
+    }
+
+    // --- find_service ---
+
+    #[test]
+    fn test_find_service() {
+        let config = minimal_config();
+        assert!(config.find_service("api").is_some());
+        assert!(config.find_service("nonexistent").is_none());
+    }
+
+    // --- Serialization round-trip ---
+
+    #[test]
+    fn test_config_roundtrip() {
+        let config = minimal_config();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.project.name, config.project.name);
+        assert_eq!(parsed.hosts.len(), config.hosts.len());
+        assert_eq!(parsed.services.len(), config.services.len());
+    }
+
+    // --- Multiple services ---
+
+    #[test]
+    fn test_multiple_services() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "api"
+            image = "api:latest"
+            replicas = 3
+            [[services]]
+            name = "worker"
+            image = "worker:latest"
+            replicas = 2
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.services.len(), 2);
+        assert_eq!(config.services[0].name, "api");
+        assert_eq!(config.services[0].replicas, 3);
+        assert_eq!(config.services[1].name, "worker");
+        assert_eq!(config.services[1].replicas, 2);
+    }
+
+    // --- Duplicate service names ---
+
+    #[test]
+    fn test_validate_duplicate_service_names() {
+        let mut config = minimal_config();
+        config.services.push(ServiceConfig::test_service("api", "other:latest"));
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate service name"));
+    }
+
+    // --- SSH port ---
+
+    #[test]
+    fn test_host_default_port() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hosts[0].port, 22);
+    }
+
+    #[test]
+    fn test_host_custom_port() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            port = 2222
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hosts[0].port, 2222);
+    }
+
+    // --- Internal address ---
+
+    #[test]
+    fn test_host_no_internal_address() {
+        let h = HostConfig::test_host("web1", "1.2.3.4");
+        assert_eq!(h.ssh_address(), "1.2.3.4");
+        assert_eq!(h.internal_addr(), "1.2.3.4"); // falls back to address
+    }
+
+    #[test]
+    fn test_host_with_internal_address() {
+        let mut h = HostConfig::test_host("web1", "203.0.113.10");
+        h.internal_address = Some("10.0.0.1".to_string());
+        assert_eq!(h.ssh_address(), "203.0.113.10"); // public
+        assert_eq!(h.internal_addr(), "10.0.0.1"); // private
+    }
+
+    #[test]
+    fn test_host_internal_address_from_toml() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "web1"
+            address = "203.0.113.10"
+            internal_address = "10.0.0.1"
+            port = 2222
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let host = &config.hosts[0];
+        assert_eq!(host.ssh_address(), "203.0.113.10");
+        assert_eq!(host.internal_addr(), "10.0.0.1");
+        assert_eq!(host.port, 2222);
     }
 }

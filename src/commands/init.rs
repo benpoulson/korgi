@@ -13,7 +13,9 @@ name = "myapp"
 
 [[hosts]]
 name = "web1"
-address = "192.168.1.10"
+address = "192.168.1.10"          # public IP (SSH connects here)
+# internal_address = "10.0.0.1"  # private IP (Traefik/internal traffic)
+# port = 22                      # SSH port (default: 22)
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
 labels = ["web"]
@@ -21,6 +23,7 @@ labels = ["web"]
 # [[hosts]]
 # name = "web2"
 # address = "192.168.1.11"
+# internal_address = "10.0.0.2"
 # user = "deploy"
 # ssh_key = "~/.ssh/id_ed25519"
 # labels = ["web"]
@@ -76,4 +79,53 @@ pub fn run(config_path: &Path) -> Result<()> {
     output::info("Edit the file to configure your hosts and services, then run 'korgi check'");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_init_creates_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("korgi.toml");
+        run(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_init_template_is_valid_toml() {
+        // The template should parse as valid TOML
+        let _: toml::Value = toml::from_str(TEMPLATE).expect("Template is not valid TOML");
+    }
+
+    #[test]
+    fn test_init_template_parses_as_config() {
+        // The template should parse as a valid Config (after removing comments)
+        use crate::config::types::Config;
+        let config: Config = toml::from_str(TEMPLATE).expect("Template doesn't parse as Config");
+        assert_eq!(config.project.name, "myapp");
+        assert!(!config.hosts.is_empty());
+        assert!(!config.services.is_empty());
+    }
+
+    #[test]
+    fn test_init_fails_if_exists() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("korgi.toml");
+        std::fs::write(&path, "existing content").unwrap();
+        let result = run(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+        // Original file should be untouched
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing content");
+    }
+
+    #[test]
+    fn test_init_template_validates() {
+        use crate::config::types::Config;
+        let config: Config = toml::from_str(TEMPLATE).unwrap();
+        config.validate().expect("Template config should validate");
+    }
 }

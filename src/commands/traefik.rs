@@ -66,7 +66,7 @@ pub async fn deploy(
 
         // Port bindings
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-        for (_, addr) in &traefik.entrypoints {
+        for addr in traefik.entrypoints.values() {
             let port = addr.trim_start_matches(':');
             port_bindings.insert(
                 format!("{}/tcp", port),

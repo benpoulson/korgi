@@ -46,16 +46,12 @@ impl SshSession {
     /// Connect to a host via SSH.
     #[instrument(skip_all, fields(host = %host.name, address = %host.address))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
-        debug!("Connecting to {} ({}@{})", host.name, host.user, host.address);
+        debug!("Connecting to {} ({}@{}:{})", host.name, host.user, host.ssh_address(), host.port);
 
         let config = Arc::new(client::Config::default());
         let handler = SshHandler;
 
-        let addr = if host.address.contains(':') {
-            host.address.clone()
-        } else {
-            format!("{}:22", host.address)
-        };
+        let addr = format!("{}:{}", host.ssh_address(), host.port);
 
         let mut handle = client::connect(config, &addr, handler)
             .await
@@ -116,10 +112,8 @@ impl SshSession {
                 russh::ChannelMsg::Data { data } => {
                     stdout.extend_from_slice(&data);
                 }
-                russh::ChannelMsg::ExtendedData { data, ext } => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(&data);
-                    }
+                russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                    stderr.extend_from_slice(&data);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = Some(exit_status);
@@ -159,10 +153,10 @@ impl SshSession {
 
 /// Expand ~ to home directory.
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var("HOME").ok() {
-            return format!("{}/{}", home, rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{}/{}", home, rest);
     }
     path.to_string()
 }

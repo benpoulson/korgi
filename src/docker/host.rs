@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bollard::models::{ContainerCreateBody, NetworkCreateRequest};
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, InspectContainerOptions, InspectNetworkOptions,
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use tracing::{debug, instrument};
 
 use crate::config::types::HostConfig;
+use super::traits::DockerHostApi;
 
 /// Docker client connected to a remote host via SSH.
 pub struct DockerHost {
@@ -21,7 +23,11 @@ impl DockerHost {
     /// Connect to Docker on a remote host via SSH.
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
-        let ssh_url = format!("ssh://{}@{}", host.user, host.address);
+        let ssh_url = if host.port != 22 {
+            format!("ssh://{}@{}:{}", host.user, host.ssh_address(), host.port)
+        } else {
+            format!("ssh://{}@{}", host.user, host.ssh_address())
+        };
         debug!("Connecting Docker client via {}", ssh_url);
 
         let key_path = host.ssh_key.as_ref().map(|k| expand_tilde(k));
@@ -220,6 +226,60 @@ impl DockerHost {
     }
 }
 
+#[async_trait]
+impl DockerHostApi for DockerHost {
+    fn host_name(&self) -> &str {
+        &self.host_name
+    }
+
+    async fn list_containers(
+        &self,
+        filters: HashMap<String, Vec<String>>,
+        all: bool,
+    ) -> Result<Vec<bollard::models::ContainerSummary>> {
+        DockerHost::list_containers(self, filters, all).await
+    }
+
+    async fn pull_image(&self, image: &str, auth: Option<bollard::auth::DockerCredentials>) -> Result<()> {
+        DockerHost::pull_image(self, image, auth).await
+    }
+
+    async fn create_container(
+        &self,
+        name: &str,
+        config: ContainerCreateBody,
+    ) -> Result<String> {
+        DockerHost::create_container(self, name, config).await
+    }
+
+    async fn start_container(&self, id: &str) -> Result<()> {
+        DockerHost::start_container(self, id).await
+    }
+
+    async fn stop_container(&self, id: &str, timeout_secs: i64) -> Result<()> {
+        DockerHost::stop_container(self, id, timeout_secs).await
+    }
+
+    async fn remove_container(&self, id: &str, force: bool) -> Result<()> {
+        DockerHost::remove_container(self, id, force).await
+    }
+
+    async fn inspect_container(
+        &self,
+        id: &str,
+    ) -> Result<bollard::models::ContainerInspectResponse> {
+        DockerHost::inspect_container(self, id).await
+    }
+
+    async fn image_exists(&self, image: &str) -> Result<bool> {
+        DockerHost::image_exists(self, image).await
+    }
+
+    async fn ensure_network(&self, name: &str) -> Result<()> {
+        DockerHost::ensure_network(self, name).await
+    }
+}
+
 /// Parse an image reference into (repository, tag).
 fn parse_image_ref(image: &str) -> (&str, &str) {
     if let Some(colon_pos) = image.rfind(':') {
@@ -233,10 +293,10 @@ fn parse_image_ref(image: &str) -> (&str, &str) {
 
 /// Expand ~ to home directory.
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}/{}", home, rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{}/{}", home, rest);
     }
     path.to_string()
 }
@@ -246,16 +306,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_image_ref() {
+    fn test_parse_image_ref_simple() {
         assert_eq!(parse_image_ref("nginx:1.25"), ("nginx", "1.25"));
+    }
+
+    #[test]
+    fn test_parse_image_ref_no_tag() {
         assert_eq!(parse_image_ref("nginx"), ("nginx", "latest"));
+    }
+
+    #[test]
+    fn test_parse_image_ref_with_registry() {
         assert_eq!(
             parse_image_ref("ghcr.io/user/repo:v1"),
             ("ghcr.io/user/repo", "v1")
         );
+    }
+
+    #[test]
+    fn test_parse_image_ref_registry_with_port_no_tag() {
+        // registry.example.com:5000/repo -- the :5000 is a port, not a tag
         assert_eq!(
             parse_image_ref("registry.example.com:5000/repo"),
             ("registry.example.com:5000/repo", "latest")
         );
+    }
+
+    #[test]
+    fn test_parse_image_ref_registry_with_port_and_tag() {
+        assert_eq!(
+            parse_image_ref("registry.example.com:5000/repo:v2"),
+            ("registry.example.com:5000/repo", "v2")
+        );
+    }
+
+    #[test]
+    fn test_parse_image_ref_sha_digest() {
+        // sha256 digests use @ not : but let's make sure : in digest doesn't break
+        assert_eq!(
+            parse_image_ref("myapp:sha-abc123"),
+            ("myapp", "sha-abc123")
+        );
+    }
+
+    #[test]
+    fn test_parse_image_ref_nested_path() {
+        assert_eq!(
+            parse_image_ref("ghcr.io/org/team/app:latest"),
+            ("ghcr.io/org/team/app", "latest")
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        let result = expand_tilde("~/path/to/key");
+        // Should expand to $HOME/path/to/key
+        assert!(!result.starts_with("~/"));
+        assert!(result.ends_with("path/to/key"));
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_just_tilde() {
+        // "~" without "/" should not expand (only "~/" does)
+        assert_eq!(expand_tilde("~"), "~");
+    }
+
+    #[test]
+    fn test_expand_tilde_relative() {
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
     }
 }

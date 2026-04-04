@@ -82,6 +82,7 @@ pub fn build_container_config(
     instance: u32,
     traefik_network: &str,
     resolved_env: &HashMap<String, String>,
+    host_bind_ip: Option<&str>,
 ) -> ContainerCreateBody {
     let container_labels = labels::all_labels(project, svc, generation, instance, traefik_network);
 
@@ -137,12 +138,35 @@ pub fn build_container_config(
         .and_then(|r| r.cpus.as_ref())
         .map(|c| parse_nano_cpus(c));
 
+    // Build port bindings if host_base or host port is configured
+    let port_bindings = svc.ports.as_ref().and_then(|ports| {
+        let host_port = if let Some(base) = ports.host_base {
+            Some(base + instance as u16)
+        } else {
+            ports.host
+        };
+
+        host_port.map(|hp| {
+            let bind_ip = host_bind_ip.unwrap_or("0.0.0.0").to_string();
+            let mut bindings = HashMap::new();
+            bindings.insert(
+                format!("{}/tcp", ports.container),
+                Some(vec![bollard::models::PortBinding {
+                    host_ip: Some(bind_ip),
+                    host_port: Some(hp.to_string()),
+                }]),
+            );
+            bindings
+        })
+    });
+
     let host_config = HostConfig {
         binds: if binds.is_empty() {
             None
         } else {
             Some(binds)
         },
+        port_bindings,
         restart_policy,
         memory,
         nano_cpus,
@@ -197,12 +221,26 @@ fn parse_nano_cpus(s: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::types::*;
+    use bollard::models::ContainerSummaryStateEnum;
+
+    // --- Parse helpers ---
 
     #[test]
     fn test_parse_duration_ns() {
         assert_eq!(parse_duration_ns("5s"), 5_000_000_000);
         assert_eq!(parse_duration_ns("1m"), 60_000_000_000);
         assert_eq!(parse_duration_ns("30s"), 30_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_duration_ns_edge_cases() {
+        assert_eq!(parse_duration_ns("0s"), 0);
+        assert_eq!(parse_duration_ns("2m"), 120_000_000_000);
+        // Bare number treated as seconds
+        assert_eq!(parse_duration_ns("10"), 10_000_000_000);
+        // With whitespace
+        assert_eq!(parse_duration_ns(" 5s "), 5_000_000_000);
     }
 
     #[test]
@@ -213,9 +251,322 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_memory_bytes_case_insensitive() {
+        assert_eq!(parse_memory_bytes("512M"), 536870912);
+        assert_eq!(parse_memory_bytes("1G"), 1073741824);
+        assert_eq!(parse_memory_bytes("256K"), 262144);
+    }
+
+    #[test]
     fn test_parse_nano_cpus() {
         assert_eq!(parse_nano_cpus("1.0"), 1_000_000_000);
         assert_eq!(parse_nano_cpus("0.5"), 500_000_000);
         assert_eq!(parse_nano_cpus("2.0"), 2_000_000_000);
+        assert_eq!(parse_nano_cpus("0.25"), 250_000_000);
+    }
+
+    // --- extract_health_from_status ---
+
+    #[test]
+    fn test_extract_health_healthy() {
+        assert_eq!(
+            extract_health_from_status(Some("Up 5 minutes (healthy)")),
+            Some("healthy".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_health_unhealthy() {
+        assert_eq!(
+            extract_health_from_status(Some("Up 3 minutes (unhealthy)")),
+            Some("unhealthy".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_health_starting() {
+        assert_eq!(
+            extract_health_from_status(Some("Up 1 second (health: starting)")),
+            Some("starting".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_health_no_health() {
+        assert_eq!(
+            extract_health_from_status(Some("Up 5 minutes")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_health_none() {
+        assert_eq!(extract_health_from_status(None), None);
+    }
+
+    // --- KorgiContainer::from_summary ---
+
+    fn make_summary(
+        labels: HashMap<String, String>,
+        state: Option<ContainerSummaryStateEnum>,
+        status: Option<String>,
+    ) -> ContainerSummary {
+        ContainerSummary {
+            id: Some("abc123".to_string()),
+            names: Some(vec!["/korgi-myapp-api-g3-0".to_string()]),
+            image: Some("myapp/api:v1".to_string()),
+            labels: Some(labels),
+            state: state,
+            status: status,
+            ..Default::default()
+        }
+    }
+
+    fn valid_labels() -> HashMap<String, String> {
+        let mut labels = HashMap::new();
+        labels.insert("korgi.project".to_string(), "myapp".to_string());
+        labels.insert("korgi.service".to_string(), "api".to_string());
+        labels.insert("korgi.generation".to_string(), "3".to_string());
+        labels.insert("korgi.instance".to_string(), "0".to_string());
+        labels.insert("korgi.image".to_string(), "myapp/api:v1".to_string());
+        labels
+    }
+
+    #[test]
+    fn test_from_summary_valid() {
+        let summary = make_summary(
+            valid_labels(),
+            Some(ContainerSummaryStateEnum::RUNNING),
+            Some("Up 5 minutes (healthy)".to_string()),
+        );
+        let container = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(container.id, "abc123");
+        assert_eq!(container.name, "korgi-myapp-api-g3-0");
+        assert_eq!(container.host_name, "web1");
+        assert_eq!(container.service, "api");
+        assert_eq!(container.generation, 3);
+        assert_eq!(container.instance, 0);
+        assert_eq!(container.image, "myapp/api:v1");
+        assert_eq!(container.state, "running");
+        assert_eq!(container.health, Some("healthy".to_string()));
+    }
+
+    #[test]
+    fn test_from_summary_stopped() {
+        let summary = make_summary(
+            valid_labels(),
+            Some(ContainerSummaryStateEnum::EXITED),
+            Some("Exited (0) 2 minutes ago".to_string()),
+        );
+        let container = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(container.state, "exited");
+        assert_eq!(container.health, None);
+    }
+
+    #[test]
+    fn test_from_summary_no_labels() {
+        let summary = ContainerSummary {
+            id: Some("abc123".to_string()),
+            labels: None,
+            ..Default::default()
+        };
+        assert!(KorgiContainer::from_summary(&summary, "web1").is_none());
+    }
+
+    #[test]
+    fn test_from_summary_missing_service_label() {
+        let mut labels = valid_labels();
+        labels.remove("korgi.service");
+        let summary = make_summary(labels, Some(ContainerSummaryStateEnum::RUNNING), None);
+        assert!(KorgiContainer::from_summary(&summary, "web1").is_none());
+    }
+
+    #[test]
+    fn test_from_summary_missing_generation_label() {
+        let mut labels = valid_labels();
+        labels.remove("korgi.generation");
+        let summary = make_summary(labels, Some(ContainerSummaryStateEnum::RUNNING), None);
+        assert!(KorgiContainer::from_summary(&summary, "web1").is_none());
+    }
+
+    #[test]
+    fn test_from_summary_invalid_generation() {
+        let mut labels = valid_labels();
+        labels.insert("korgi.generation".to_string(), "notanumber".to_string());
+        let summary = make_summary(labels, Some(ContainerSummaryStateEnum::RUNNING), None);
+        assert!(KorgiContainer::from_summary(&summary, "web1").is_none());
+    }
+
+    #[test]
+    fn test_from_summary_image_fallback_to_summary() {
+        let mut labels = valid_labels();
+        labels.remove("korgi.image");
+        let summary = make_summary(
+            labels,
+            Some(ContainerSummaryStateEnum::RUNNING),
+            None,
+        );
+        let container = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(container.image, "myapp/api:v1"); // falls back to summary.image
+    }
+
+    // --- build_container_config ---
+
+    #[test]
+    fn test_build_container_config_minimal() {
+        let svc = ServiceConfig::test_service("api", "myapp/api:v1");
+        let env = HashMap::new();
+        let config = build_container_config("myapp", &svc, 1, 0, "korgi-traefik", &env, None);
+
+        assert_eq!(config.image, Some("myapp/api:v1".to_string()));
+        assert!(config.healthcheck.is_none()); // no health config
+        assert!(config.env.is_none()); // empty env
+        assert!(config.cmd.is_none());
+        assert!(config.entrypoint.is_none());
+
+        let labels = config.labels.unwrap();
+        assert_eq!(labels.get("korgi.project").unwrap(), "myapp");
+        assert_eq!(labels.get("korgi.service").unwrap(), "api");
+        assert_eq!(labels.get("korgi.generation").unwrap(), "1");
+
+        let host_config = config.host_config.unwrap();
+        assert_eq!(host_config.network_mode, Some("korgi-traefik".to_string()));
+        assert!(host_config.binds.is_none()); // no volumes
+    }
+
+    #[test]
+    fn test_build_container_config_with_health() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.ports = Some(PortsConfig {
+            container: 3000,
+            host: None,
+            host_base: None,
+        });
+        svc.health = Some(HealthConfig {
+            path: "/ready".to_string(),
+            interval: "10s".to_string(),
+            timeout: "5s".to_string(),
+            retries: 5,
+            start_period: Some("15s".to_string()),
+        });
+
+        let config = build_container_config("proj", &svc, 2, 0, "net", &HashMap::new(), None);
+        let hc = config.healthcheck.unwrap();
+        let test = hc.test.unwrap();
+        assert_eq!(test[0], "CMD-SHELL");
+        assert!(test[1].contains("localhost:3000/ready"));
+        assert_eq!(hc.interval, Some(10_000_000_000));
+        assert_eq!(hc.timeout, Some(5_000_000_000));
+        assert_eq!(hc.retries, Some(5));
+        assert_eq!(hc.start_period, Some(15_000_000_000));
+    }
+
+    #[test]
+    fn test_build_container_config_with_env() {
+        let svc = ServiceConfig::test_service("api", "api:v1");
+        let mut env = HashMap::new();
+        env.insert("DATABASE_URL".to_string(), "postgres://localhost/db".to_string());
+        env.insert("REDIS_URL".to_string(), "redis://localhost".to_string());
+
+        let config = build_container_config("proj", &svc, 1, 0, "net", &env, None);
+        let env_vars = config.env.unwrap();
+        assert_eq!(env_vars.len(), 2);
+        assert!(env_vars.contains(&"DATABASE_URL=postgres://localhost/db".to_string()));
+        assert!(env_vars.contains(&"REDIS_URL=redis://localhost".to_string()));
+    }
+
+    #[test]
+    fn test_build_container_config_with_volumes() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.volumes = vec![
+            VolumeConfig {
+                host: "/data".to_string(),
+                container: "/app/data".to_string(),
+                readonly: false,
+            },
+            VolumeConfig {
+                host: "/config".to_string(),
+                container: "/app/config".to_string(),
+                readonly: true,
+            },
+        ];
+
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        let binds = config.host_config.unwrap().binds.unwrap();
+        assert_eq!(binds.len(), 2);
+        assert!(binds.contains(&"/data:/app/data".to_string()));
+        assert!(binds.contains(&"/config:/app/config:ro".to_string()));
+    }
+
+    #[test]
+    fn test_build_container_config_with_resources() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.resources = Some(ResourcesConfig {
+            memory: Some("256m".to_string()),
+            cpus: Some("0.5".to_string()),
+        });
+
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        let hc = config.host_config.unwrap();
+        assert_eq!(hc.memory, Some(268435456)); // 256 * 1024 * 1024
+        assert_eq!(hc.nano_cpus, Some(500_000_000));
+    }
+
+    #[test]
+    fn test_build_container_config_restart_policies() {
+        for (policy_str, expected) in [
+            ("no", RestartPolicyNameEnum::NO),
+            ("always", RestartPolicyNameEnum::ALWAYS),
+            ("on-failure", RestartPolicyNameEnum::ON_FAILURE),
+            ("unless-stopped", RestartPolicyNameEnum::UNLESS_STOPPED),
+            ("anything-else", RestartPolicyNameEnum::UNLESS_STOPPED),
+        ] {
+            let mut svc = ServiceConfig::test_service("api", "api:v1");
+            svc.restart = policy_str.to_string();
+            let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+            let restart = config.host_config.unwrap().restart_policy.unwrap();
+            assert_eq!(restart.name, Some(expected), "Failed for policy: {}", policy_str);
+        }
+    }
+
+    #[test]
+    fn test_build_container_config_with_command_and_entrypoint() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.command = Some(vec!["serve".to_string(), "--port".to_string(), "8080".to_string()]);
+        svc.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
+
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        assert_eq!(
+            config.cmd.unwrap(),
+            vec!["serve", "--port", "8080"]
+        );
+        assert_eq!(
+            config.entrypoint.unwrap(),
+            vec!["/bin/sh", "-c"]
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_traefik_labels() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.routing = Some(RoutingConfig {
+            rule: "Host(`api.example.com`)".to_string(),
+            entrypoints: vec!["web".to_string()],
+            tls: false,
+        });
+        svc.ports = Some(PortsConfig {
+            container: 8080,
+            host: None,
+            host_base: None,
+        });
+
+        let config = build_container_config("myapp", &svc, 5, 0, "korgi-traefik", &HashMap::new(), None);
+        let labels = config.labels.unwrap();
+        assert_eq!(labels.get("traefik.enable").unwrap(), "true");
+        assert_eq!(
+            labels.get("traefik.http.routers.myapp-api.rule").unwrap(),
+            "Host(`api.example.com`)"
+        );
+        assert_eq!(labels.get("korgi.generation").unwrap(), "5");
     }
 }

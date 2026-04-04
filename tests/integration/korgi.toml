@@ -1,0 +1,49 @@
+[project]
+name = "testapp"
+
+[[hosts]]
+name = "host-a"
+address = "127.0.0.1"
+port = 2201
+user = "root"
+ssh_key = "tests/integration/test_key"
+labels = ["web"]
+
+[[hosts]]
+name = "host-b"
+address = "127.0.0.1"
+port = 2202
+user = "root"
+ssh_key = "tests/integration/test_key"
+labels = ["web"]
+
+[traefik]
+image = "traefik:v3.2"
+hosts = ["host-a"]
+entrypoints = { web = ":80" }
+network = "korgi-traefik"
+
+[[services]]
+name = "web"
+image = "nginx:alpine"
+replicas = 3
+placement_labels = ["web"]
+
+[services.health]
+path = "/"
+interval = "2s"
+timeout = "2s"
+retries = 3
+start_period = "5s"
+
+[services.routing]
+rule = "Host(`test.local`)"
+entrypoints = ["web"]
+
+[services.ports]
+container = 80
+
+[services.deploy]
+drain_seconds = 5
+start_delay = 3
+rollback_keep = 1

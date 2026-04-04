@@ -75,6 +75,38 @@ pub fn traefik_labels(
             ),
             ports.container.to_string(),
         );
+
+        // Add Traefik-side health check labels if the service has health config
+        if let Some(health) = &svc_config.health {
+            labels.insert(
+                format!(
+                    "traefik.http.services.{}.loadbalancer.healthcheck.path",
+                    router_name
+                ),
+                health.path.clone(),
+            );
+            labels.insert(
+                format!(
+                    "traefik.http.services.{}.loadbalancer.healthcheck.interval",
+                    router_name
+                ),
+                health.interval.clone(),
+            );
+            labels.insert(
+                format!(
+                    "traefik.http.services.{}.loadbalancer.healthcheck.timeout",
+                    router_name
+                ),
+                health.timeout.clone(),
+            );
+            labels.insert(
+                format!(
+                    "traefik.http.services.{}.loadbalancer.healthcheck.port",
+                    router_name
+                ),
+                ports.container.to_string(),
+            );
+        }
     }
 
     // Set the Docker network for Traefik to use
@@ -228,6 +260,7 @@ mod tests {
             ports: Some(PortsConfig {
                 container: 8080,
                 host: None,
+                host_base: None,
             }),
             volumes: vec![],
             resources: None,
@@ -293,9 +326,338 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_generation_missing() {
+        let labels = HashMap::new();
+        assert_eq!(parse_generation(&labels), None);
+    }
+
+    #[test]
+    fn test_parse_generation_invalid() {
+        let mut labels = HashMap::new();
+        labels.insert("korgi.generation".to_string(), "notanumber".to_string());
+        assert_eq!(parse_generation(&labels), None);
+    }
+
+    #[test]
+    fn test_parse_instance() {
+        let mut labels = HashMap::new();
+        labels.insert("korgi.instance".to_string(), "5".to_string());
+        assert_eq!(parse_instance(&labels), Some(5));
+    }
+
+    #[test]
+    fn test_parse_instance_missing() {
+        let labels = HashMap::new();
+        assert_eq!(parse_instance(&labels), None);
+    }
+
+    #[test]
+    fn test_parse_service() {
+        let mut labels = HashMap::new();
+        labels.insert("korgi.service".to_string(), "api".to_string());
+        assert_eq!(parse_service(&labels), Some("api".to_string()));
+    }
+
+    #[test]
+    fn test_parse_service_missing() {
+        let labels = HashMap::new();
+        assert_eq!(parse_service(&labels), None);
+    }
+
+    #[test]
+    fn test_parse_image() {
+        let mut labels = HashMap::new();
+        labels.insert("korgi.image".to_string(), "myapp/api:v2".to_string());
+        assert_eq!(parse_image(&labels), Some("myapp/api:v2".to_string()));
+    }
+
+    #[test]
     fn test_project_filter() {
         let filters = project_filter("myapp");
         let labels = filters.get("label").unwrap();
+        assert_eq!(labels.len(), 1);
         assert!(labels.contains(&"korgi.project=myapp".to_string()));
+    }
+
+    #[test]
+    fn test_service_filter() {
+        let filters = service_filter("myapp", "api");
+        let labels = filters.get("label").unwrap();
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains(&"korgi.project=myapp".to_string()));
+        assert!(labels.contains(&"korgi.service=api".to_string()));
+    }
+
+    #[test]
+    fn test_generation_filter() {
+        let filters = generation_filter("myapp", "api", 5);
+        let labels = filters.get("label").unwrap();
+        assert_eq!(labels.len(), 3);
+        assert!(labels.contains(&"korgi.project=myapp".to_string()));
+        assert!(labels.contains(&"korgi.service=api".to_string()));
+        assert!(labels.contains(&"korgi.generation=5".to_string()));
+    }
+
+    #[test]
+    fn test_container_name_various() {
+        assert_eq!(
+            container_name("app", "web", 1, 0),
+            "korgi-app-web-g1-0"
+        );
+        assert_eq!(
+            container_name("myapp", "worker", 10, 3),
+            "korgi-myapp-worker-g10-3"
+        );
+    }
+
+    #[test]
+    fn test_all_labels_with_routing() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "myapp/api:v3".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec!["web".to_string()],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: Some(PortsConfig {
+                container: 3000,
+                host: None,
+                host_base: None,
+            }),
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = all_labels("proj", &svc, 7, 2, "my-net");
+        // Should have both metadata and traefik labels
+        assert_eq!(labels.get("korgi.project").unwrap(), "proj");
+        assert_eq!(labels.get("korgi.service").unwrap(), "api");
+        assert_eq!(labels.get("korgi.generation").unwrap(), "7");
+        assert_eq!(labels.get("korgi.instance").unwrap(), "2");
+        assert_eq!(labels.get("korgi.image").unwrap(), "myapp/api:v3");
+        assert_eq!(labels.get("traefik.enable").unwrap(), "true");
+        assert_eq!(
+            labels.get("traefik.http.services.proj-api.loadbalancer.server.port").unwrap(),
+            "3000"
+        );
+        assert_eq!(labels.get("traefik.docker.network").unwrap(), "my-net");
+    }
+
+    #[test]
+    fn test_all_labels_without_routing() {
+        let svc = ServiceConfig {
+            name: "worker".to_string(),
+            image: "worker:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: None,
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = all_labels("proj", &svc, 1, 0, "net");
+        // Should have metadata but no traefik labels
+        assert_eq!(labels.get("korgi.project").unwrap(), "proj");
+        assert!(labels.get("traefik.enable").is_none());
+        // Exactly 5 metadata labels
+        assert_eq!(labels.len(), 5);
+    }
+
+    #[test]
+    fn test_traefik_labels_tls_certresolver() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                rule: "Host(`secure.example.com`)".to_string(),
+                entrypoints: vec!["websecure".to_string()],
+                tls: true,
+            }),
+            env: HashMap::new(),
+            ports: Some(PortsConfig {
+                container: 443,
+                host: None,
+                host_base: None,
+            }),
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert_eq!(
+            labels.get("traefik.http.routers.proj-api.tls").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            labels.get("traefik.http.routers.proj-api.tls.certresolver").unwrap(),
+            "letsencrypt"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_multiple_entrypoints() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                rule: "Host(`example.com`)".to_string(),
+                entrypoints: vec!["web".to_string(), "websecure".to_string()],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert_eq!(
+            labels.get("traefik.http.routers.proj-api.entrypoints").unwrap(),
+            "web,websecure"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_no_port_no_port_label() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                rule: "Host(`example.com`)".to_string(),
+                entrypoints: vec![],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.server.port").is_none());
+    }
+
+    #[test]
+    fn test_traefik_labels_with_health_check() {
+        use crate::config::types::HealthConfig;
+
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: Some(HealthConfig {
+                path: "/ready".to_string(),
+                interval: "10s".to_string(),
+                timeout: "5s".to_string(),
+                retries: 3,
+                start_period: None,
+            }),
+            routing: Some(RoutingConfig {
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec!["web".to_string()],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: None,
+            }),
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert_eq!(
+            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.path").unwrap(),
+            "/ready"
+        );
+        assert_eq!(
+            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.interval").unwrap(),
+            "10s"
+        );
+        assert_eq!(
+            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.timeout").unwrap(),
+            "5s"
+        );
+        assert_eq!(
+            labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.port").unwrap(),
+            "8080"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_no_health_check_no_healthcheck_labels() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None, // no health check
+            routing: Some(RoutingConfig {
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec!["web".to_string()],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: None,
+            }),
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        // Should have port but no health check labels
+        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.server.port").is_some());
+        assert!(labels.get("traefik.http.services.proj-api.loadbalancer.healthcheck.path").is_none());
     }
 }

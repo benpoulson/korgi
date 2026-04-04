@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
-use crate::docker::host::DockerHost;
+use crate::docker::traits::DockerHostApi;
 
 /// Wait for a container to become healthy by polling docker inspect.
-pub async fn wait_healthy(
-    docker: &DockerHost,
+pub async fn wait_healthy<D: DockerHostApi>(
+    docker: &D,
     container_id: &str,
     timeout: Duration,
 ) -> Result<()> {
@@ -19,7 +19,7 @@ pub async fn wait_healthy(
                 "Container {} did not become healthy within {}s on {}",
                 container_id,
                 timeout.as_secs(),
-                docker.host_name
+                docker.host_name()
             );
         }
 
@@ -31,7 +31,7 @@ pub async fn wait_healthy(
                 anyhow::bail!(
                     "Container {} exited on {}",
                     container_id,
-                    docker.host_name
+                    docker.host_name()
                 );
             }
 
@@ -60,7 +60,7 @@ pub async fn wait_healthy(
                     anyhow::bail!(
                         "Container {} unhealthy on {}: {}",
                         container_id,
-                        docker.host_name,
+                        docker.host_name(),
                         log_msg
                     );
                 } else {
@@ -77,5 +77,51 @@ pub async fn wait_healthy(
         }
 
         tokio::time::sleep(poll_interval).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docker::mock::tests::MockDockerHost;
+    use bollard::models::HealthStatusEnum;
+
+    #[tokio::test]
+    async fn test_wait_healthy_already_healthy() {
+        let mock = MockDockerHost::new("web1");
+        mock.set_health_status(Some(HealthStatusEnum::HEALTHY));
+
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_wait_healthy_unhealthy_fails() {
+        let mock = MockDockerHost::new("web1");
+        mock.set_health_status(Some(HealthStatusEnum::UNHEALTHY));
+
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unhealthy"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_healthy_container_exited_fails() {
+        let mock = MockDockerHost::new("web1");
+        mock.set_container_running(false);
+        mock.set_health_status(Some(HealthStatusEnum::HEALTHY));
+
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exited"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_healthy_no_healthcheck_treats_as_healthy() {
+        let mock = MockDockerHost::new("web1");
+        mock.set_health_status(None); // No health check configured
+
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        assert!(result.is_ok(), "Container without healthcheck should be treated as healthy if running");
     }
 }
