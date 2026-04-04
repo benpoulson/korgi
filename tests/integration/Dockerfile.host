@@ -1,7 +1,8 @@
 # Simulated korgi target host: Docker-in-Docker + SSH server
 FROM docker:27-dind
 
-RUN apk add --no-cache openssh-server bash
+# Fix Alpine package conflicts, then install SSH + bash
+RUN apk update && apk add --no-cache openssh-server openssh-client bash
 
 # Configure SSH
 RUN mkdir -p /root/.ssh && \
@@ -10,12 +11,8 @@ RUN mkdir -p /root/.ssh && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
 
-# Will be mounted at runtime: test SSH key
-# COPY test_key.pub /root/.ssh/authorized_keys
-
 EXPOSE 22
 
-# Start both dockerd and sshd
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

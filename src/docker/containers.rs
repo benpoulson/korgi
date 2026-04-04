@@ -96,7 +96,10 @@ pub fn build_container_config(
         bollard::models::HealthConfig {
             test: Some(vec![
                 "CMD-SHELL".to_string(),
-                format!("wget -q --spider http://localhost:{}{} || exit 1", port, h.path),
+                format!(
+                    "(curl -sf http://localhost:{}{} > /dev/null) || (wget -q --spider http://localhost:{}{}) || exit 1",
+                    port, h.path, port, h.path
+                ),
             ]),
             interval: Some(parse_duration_ns(&h.interval)),
             timeout: Some(parse_duration_ns(&h.timeout)),

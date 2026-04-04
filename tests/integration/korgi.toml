@@ -1,8 +1,10 @@
 [project]
 name = "testapp"
 
+# Integration test: host-a is both LB and node (co-located mode)
 [[hosts]]
 name = "host-a"
+role = "lb"
 address = "127.0.0.1"
 port = 2201
 user = "root"
@@ -19,7 +21,6 @@ labels = ["web"]
 
 [traefik]
 image = "traefik:v3.2"
-hosts = ["host-a"]
 entrypoints = { web = ":80" }
 network = "korgi-traefik"
 
@@ -44,6 +45,6 @@ entrypoints = ["web"]
 container = 80
 
 [services.deploy]
-drain_seconds = 5
-start_delay = 3
+drain_seconds = 30
+start_delay = 5
 rollback_keep = 1

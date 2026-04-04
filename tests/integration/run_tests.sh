@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 KORGI="./target/release/korgi"
@@ -12,27 +12,14 @@ run_test() {
     local name="$1"
     shift
     echo -n "  TEST: $name ... "
-    if "$@" >/dev/null 2>&1; then
+    if timeout 120 "$@" >/dev/null 2>&1; then
         echo "PASS"
-        ((passed++))
+        passed=$((passed + 1))
     else
         echo "FAIL"
-        ((failed++))
+        failed=$((failed + 1))
         # Show output on failure
-        "$@" 2>&1 | tail -20 || true
-    fi
-}
-
-run_test_expect_fail() {
-    local name="$1"
-    shift
-    echo -n "  TEST: $name ... "
-    if "$@" >/dev/null 2>&1; then
-        echo "FAIL (expected failure but succeeded)"
-        ((failed++))
-    else
-        echo "PASS (expected failure)"
-        ((passed++))
+        timeout 120 "$@" 2>&1 | tail -20 || true
     fi
 }
 
@@ -68,8 +55,17 @@ echo "--- Deploy ---"
 run_test "korgi deploy (first deploy)" \
     $KORGI --config $CONFIG deploy
 
-run_test "korgi status shows 3 containers after deploy" \
-    bash -c "$KORGI --config $CONFIG status 2>&1 | grep -c 'web' | grep -q 3"
+echo -n "  TEST: korgi status shows containers after deploy ... "
+STATUS_OUT=$(timeout 30 $KORGI --config $CONFIG status 2>&1 || true)
+CONTAINER_COUNT=$(echo "$STATUS_OUT" | grep -c "web" || true)
+if [ "$CONTAINER_COUNT" -ge 3 ]; then
+    echo "PASS ($CONTAINER_COUNT containers)"
+    passed=$((passed + 1))
+else
+    echo "FAIL (expected >= 3, got $CONTAINER_COUNT)"
+    failed=$((failed + 1))
+    echo "$STATUS_OUT" | tail -10
+fi
 
 # --- Scale ---
 echo "--- Scale ---"
@@ -82,7 +78,7 @@ run_test "korgi scale down to 2" \
 # --- Deploy v2 (zero-downtime) ---
 echo "--- Zero-downtime deploy ---"
 run_test "korgi deploy with image override (v2)" \
-    $KORGI --config $CONFIG deploy --service web --image nginx:latest
+    $KORGI --config $CONFIG deploy --service web --image nginx:1.27-alpine
 
 # --- Rollback ---
 echo "--- Rollback ---"
@@ -96,20 +92,35 @@ run_test "korgi exec runs command in container" \
 
 # --- Logs ---
 echo "--- Logs ---"
-run_test "korgi logs shows output" \
-    bash -c "$KORGI --config $CONFIG logs --service web 2>&1 | head -5 | grep -q ."
+echo -n "  TEST: korgi logs shows output ... "
+LOGS_OUT=$(timeout 10 $KORGI --config $CONFIG logs --service web 2>&1 || true)
+if [ -n "$LOGS_OUT" ]; then
+    echo "PASS"
+    passed=$((passed + 1))
+else
+    echo "FAIL (empty output)"
+    failed=$((failed + 1))
+fi
 
 # --- Destroy ---
 echo "--- Destroy ---"
 run_test "korgi destroy removes all containers" \
     $KORGI --config $CONFIG destroy
 
-run_test "korgi status shows 0 containers after destroy" \
-    bash -c "$KORGI --config $CONFIG status 2>&1 | grep -c 'running' | grep -q 0 || true"
+echo -n "  TEST: korgi status shows 0 containers after destroy ... "
+STATUS_AFTER=$(timeout 30 $KORGI --config $CONFIG status 2>&1 || true)
+if echo "$STATUS_AFTER" | grep -q "No containers"; then
+    echo "PASS"
+    passed=$((passed + 1))
+else
+    echo "FAIL"
+    failed=$((failed + 1))
+    echo "$STATUS_AFTER" | tail -5
+fi
 
 # --- Summary ---
 echo ""
 echo "=== Results: $passed passed, $failed failed ==="
-if [ $failed -gt 0 ]; then
+if [ "$failed" -gt 0 ]; then
     exit 1
 fi

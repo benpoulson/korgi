@@ -23,14 +23,16 @@ impl DockerHost {
     /// Connect to Docker on a remote host via SSH.
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
-        let ssh_url = if host.port != 22 {
-            format!("ssh://{}@{}:{}", host.user, host.ssh_address(), host.port)
-        } else {
-            format!("ssh://{}@{}", host.user, host.ssh_address())
-        };
-        debug!("Connecting Docker client via {}", ssh_url);
+        let ssh_url = format!("ssh://{}@{}", host.user, host.ssh_address());
+        debug!("Connecting Docker client via {} (port {})", ssh_url, host.port);
 
         let key_path = host.ssh_key.as_ref().map(|k| expand_tilde(k));
+
+        // bollard's openssh transport has a bug: it strips the ssh:// scheme before
+        // passing to openssh's resolve(), so port parsing from the URL never triggers.
+        // Workaround: write non-standard port/key config to ~/.ssh/config so the
+        // system SSH binary picks it up (openssh crate reads ~/.ssh/config by default).
+        ensure_ssh_config(host)?;
 
         let client = Docker::connect_with_ssh(
             &ssh_url,
@@ -324,6 +326,49 @@ fn parse_image_ref(image: &str) -> (&str, &str) {
 }
 
 /// Expand ~ to home directory.
+/// Ensure ~/.ssh/config has entries for hosts with non-standard ports or key files.
+/// This works around bollard's openssh transport not passing ports from the SSH URL.
+/// Entries are idempotent -- only written if not already present.
+fn ensure_ssh_config(host: &HostConfig) -> Result<()> {
+    if host.port == 22 && host.ssh_key.is_none() {
+        return Ok(()); // nothing custom to configure
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).ok();
+    let config_path = ssh_dir.join("config");
+
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // Use a korgi-specific marker to identify our managed entries
+    let marker = format!("# korgi:{}", host.name);
+    if existing.contains(&marker) {
+        return Ok(()); // already configured
+    }
+
+    let mut entry = format!("\n{}\nHost {}\n", marker, host.ssh_address());
+    if host.port != 22 {
+        entry.push_str(&format!("  Port {}\n", host.port));
+    }
+    if let Some(key) = &host.ssh_key {
+        entry.push_str(&format!("  IdentityFile {}\n", key));
+    }
+    entry.push_str("  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n");
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("Failed to write SSH config at {}", config_path.display()))?;
+    file.write_all(entry.as_bytes())
+        .with_context(|| "Failed to append to SSH config")?;
+
+    debug!("Added SSH config entry for {} (port {})", host.name, host.port);
+    Ok(())
+}
+
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
