@@ -8,34 +8,13 @@ korgi deploy --service api
 
 ## Install
 
-**macOS (Apple Silicon)**
 ```sh
-curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-macos-arm64.tar.gz | tar xz
-sudo mv korgi /usr/local/bin/
+curl -sL https://raw.githubusercontent.com/benpoulson/korgi/master/install.sh | sh
 ```
 
-**macOS (Intel)**
-```sh
-curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-macos-amd64.tar.gz | tar xz
-sudo mv korgi /usr/local/bin/
-```
+Detects your OS and architecture automatically. Supports macOS (Intel/Apple Silicon) and Linux (x86_64/ARM64).
 
-**Linux (x86_64)**
-```sh
-curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-linux-amd64.tar.gz | tar xz
-sudo mv korgi /usr/local/bin/
-```
-
-**Linux (ARM64)**
-```sh
-curl -L https://github.com/benpoulson/korgi/releases/latest/download/korgi-linux-arm64.tar.gz | tar xz
-sudo mv korgi /usr/local/bin/
-```
-
-**From source**
-```sh
-cargo install --path .
-```
+Or build from source: `cargo install --path .`
 
 ---
 
