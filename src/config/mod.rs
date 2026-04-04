@@ -52,13 +52,12 @@ fn load_secrets_from_raw_toml(
             .join(secrets_path)
     };
 
-    let content = std::fs::read_to_string(&secrets_file).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to read secrets file '{}': {}",
-            secrets_file.display(),
-            e
-        )
-    })?;
+    // File is optional -- if it doesn't exist, just return empty map.
+    // Secrets are only needed if ${VAR} references can't resolve from system env.
+    let content = match std::fs::read_to_string(&secrets_file) {
+        Ok(c) => c,
+        Err(_) => return Ok(secrets),
+    };
 
     for line in content.lines() {
         let line = line.trim();
@@ -321,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secrets_file_missing_fails() {
+    fn test_secrets_file_missing_is_ok() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("korgi.toml");
 
@@ -338,8 +337,8 @@ mod tests {
         )
         .unwrap();
 
+        // Missing secrets file is fine -- only fails if a ${VAR} can't resolve
         let result = load_config(&path, None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("secrets file"));
+        assert!(result.is_ok());
     }
 }
