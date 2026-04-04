@@ -66,8 +66,7 @@ You can also run Traefik on every host (co-located mode) if you prefer -- the en
 
 ### Prerequisites
 
-- Rust toolchain (for building)
-- SSH access to your target hosts
+- SSH access to your target hosts (key-based auth, passphrases supported)
 - Docker installed on target hosts
 - SSH user in the `docker` group
 
@@ -309,6 +308,14 @@ port = 22                          # SSH port (default: 22)
 ```
 
 If `internal_address` is not set, `address` is used for both SSH and routing.
+
+### SSH Authentication
+
+Korgi uses pure Rust SSH (no system `ssh` binary needed). Authentication methods:
+
+- **Key file** -- set `ssh_key` on the host. Passphrase-protected keys are supported (you'll be prompted).
+- **Default keys** -- if no `ssh_key` is set, Korgi tries `~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa` in order.
+- **Passphrases** -- if a key is encrypted, Korgi prompts for the passphrase interactively.
 
 ### Port Allocation
 

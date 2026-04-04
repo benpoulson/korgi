@@ -21,25 +21,76 @@ pub struct DockerHost {
 
 impl DockerHost {
     /// Connect to Docker on a remote host via SSH.
+    ///
+    /// Uses russh to establish an SSH session, then starts a local Unix socket
+    /// proxy that bridges connections to the remote Docker socket via
+    /// `direct-streamlocal`. bollard connects to the local socket.
+    /// Pure Rust -- no system SSH binary needed, handles passphrases via ssh-agent.
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
-        let ssh_url = format!("ssh://{}@{}", host.user, host.ssh_address());
+        let docker_socket = host
+            .docker_socket
+            .as_deref()
+            .unwrap_or("/var/run/docker.sock");
+
         debug!(
-            "Connecting Docker client via {} (port {})",
-            ssh_url, host.port
+            "Connecting to {}@{}:{} (docker: {})",
+            host.user,
+            host.ssh_address(),
+            host.port,
+            docker_socket
         );
 
-        let key_path = host.ssh_key.as_ref().map(|k| expand_tilde(k));
+        // Establish SSH session via russh
+        let ssh = crate::ssh::session::SshSession::connect(host)
+            .await
+            .with_context(|| format!("SSH connection failed to {}", host.name))?;
 
-        // bollard's openssh transport has a bug: it strips the ssh:// scheme before
-        // passing to openssh's resolve(), so port parsing from the URL never triggers.
-        // Workaround: write non-standard port/key config to ~/.ssh/config so the
-        // system SSH binary picks it up (openssh crate reads ~/.ssh/config by default).
-        ensure_ssh_config(host)?;
+        let ssh_handle = std::sync::Arc::new(ssh);
 
-        let client =
-            Docker::connect_with_ssh(&ssh_url, 120, bollard::API_DEFAULT_VERSION, key_path)
-                .with_context(|| format!("Failed to connect Docker on {}", host.name))?;
+        // Create a local Unix socket for bollard to connect to
+        let socket_dir = std::env::temp_dir().join("korgi");
+        std::fs::create_dir_all(&socket_dir).ok();
+        let socket_path = socket_dir.join(format!("{}.sock", host.name));
+
+        // Clean up stale socket
+        if socket_path.exists() {
+            std::fs::remove_file(&socket_path).ok();
+        }
+
+        let listener = tokio::net::UnixListener::bind(&socket_path)
+            .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
+
+        // Spawn proxy: accepts local connections, bridges each to a remote
+        // Docker socket channel via SSH direct-streamlocal
+        let remote_socket = docker_socket.to_string();
+        let proxy_ssh = ssh_handle.clone();
+        let host_dbg = host.name.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (local_stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let ssh = proxy_ssh.clone();
+                let remote = remote_socket.clone();
+                let h = host_dbg.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = proxy_to_remote_socket(local_stream, &ssh, &remote).await {
+                        tracing::debug!("Docker proxy error on {}: {}", h, e);
+                    }
+                });
+            }
+        });
+
+        // Connect bollard to the local Unix socket
+        let client = Docker::connect_with_unix(
+            socket_path.to_str().unwrap(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .with_context(|| format!("Failed to connect bollard on {}", host.name))?;
 
         // Verify connection
         let _: String = client
@@ -331,177 +382,31 @@ fn parse_image_ref(image: &str) -> (&str, &str) {
     (image, "latest")
 }
 
-/// Expand ~ to home directory.
-const KORGI_SSH_BEGIN: &str = "# --- korgi managed begin ---";
-const KORGI_SSH_END: &str = "# --- korgi managed end ---";
-
-/// Ensure ~/.ssh/config has entries for hosts with non-standard ports or key files.
-/// This works around bollard's openssh transport not passing ports from the SSH URL.
-/// Idempotent -- rewrites the korgi-managed block, preserving all other config.
-fn ensure_ssh_config(host: &HostConfig) -> Result<()> {
-    if host.port == 22 && host.ssh_key.is_none() {
-        return Ok(()); // nothing custom to configure
-    }
-
-    let config_path = ssh_config_path();
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    // Extract the existing korgi block entries (if any)
-    let mut korgi_entries = parse_korgi_block(&existing);
-
-    // Update/add entry for this host
-    let entry = build_ssh_entry(host);
-    korgi_entries.insert(host.name.clone(), entry);
-
-    // Rewrite the file with the updated korgi block
-    write_ssh_config(&config_path, &existing, &korgi_entries)?;
-
-    debug!("SSH config updated for {} (port {})", host.name, host.port);
-    Ok(())
-}
-
-/// Write all korgi hosts to the SSH config at once (used during connect_all).
-/// Removes entries for hosts no longer in the config.
-pub fn sync_ssh_config(hosts: &[&HostConfig]) -> Result<()> {
-    let config_path = ssh_config_path();
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    let mut entries = std::collections::HashMap::new();
-    for host in hosts {
-        if host.port != 22 || host.ssh_key.is_some() {
-            entries.insert(host.name.clone(), build_ssh_entry(host));
-        }
-    }
-
-    write_ssh_config(&config_path, &existing, &entries)?;
-    Ok(())
-}
-
-/// Remove all korgi-managed entries from ~/.ssh/config.
-pub fn clean_ssh_config() -> Result<()> {
-    let config_path = ssh_config_path();
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-    write_ssh_config(&config_path, &existing, &std::collections::HashMap::new())?;
-    debug!("Cleaned korgi entries from SSH config");
-    Ok(())
-}
-
-fn ssh_config_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).ok();
-    ssh_dir.join("config")
-}
-
-fn build_ssh_entry(host: &HostConfig) -> String {
-    let mut entry = format!("Host {}\n", host.ssh_address());
-    if host.port != 22 {
-        entry.push_str(&format!("  Port {}\n", host.port));
-    }
-    if let Some(key) = &host.ssh_key {
-        entry.push_str(&format!("  IdentityFile {}\n", key));
-    }
-    entry.push_str("  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n");
-    entry
-}
-
-/// Parse existing korgi block from SSH config into a map of host_name → entry.
-fn parse_korgi_block(config: &str) -> std::collections::HashMap<String, String> {
-    let mut entries = std::collections::HashMap::new();
-    let mut in_block = false;
-    let mut current_name = String::new();
-    let mut current_entry = String::new();
-
-    for line in config.lines() {
-        if line.trim() == KORGI_SSH_BEGIN {
-            in_block = true;
-            continue;
-        }
-        if line.trim() == KORGI_SSH_END {
-            if !current_name.is_empty() {
-                entries.insert(current_name.clone(), current_entry.clone());
-            }
-            in_block = false;
-            current_name.clear();
-            current_entry.clear();
-            continue;
-        }
-        if in_block {
-            if let Some(name) = line.strip_prefix("# korgi:") {
-                if !current_name.is_empty() {
-                    entries.insert(current_name.clone(), current_entry.clone());
-                }
-                current_name = name.trim().to_string();
-                current_entry.clear();
-            } else if !current_name.is_empty() {
-                current_entry.push_str(line);
-                current_entry.push('\n');
-            }
-        }
-    }
-
-    entries
-}
-
-/// Rewrite SSH config: preserve everything outside the korgi block, replace the block.
-fn write_ssh_config(
-    path: &std::path::Path,
-    existing: &str,
-    entries: &std::collections::HashMap<String, String>,
+/// Bridge a local Unix stream to the remote Docker socket via an SSH channel.
+async fn proxy_to_remote_socket(
+    local: tokio::net::UnixStream,
+    ssh: &std::sync::Arc<crate::ssh::session::SshSession>,
+    remote_socket: &str,
 ) -> Result<()> {
-    let mut output = String::new();
-    let mut in_block = false;
+    let channel = ssh.open_direct_streamlocal(remote_socket).await?;
+    let (local_read, local_write) = local.into_split();
+    let stream = channel.into_stream();
+    let (ch_read, ch_write) = tokio::io::split(stream);
 
-    // Copy everything outside the korgi block
-    for line in existing.lines() {
-        if line.trim() == KORGI_SSH_BEGIN {
-            in_block = true;
-            continue;
-        }
-        if line.trim() == KORGI_SSH_END {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            output.push_str(line);
-            output.push('\n');
-        }
+    let mut local_read = local_read;
+    let mut local_write = local_write;
+    let mut ch_read = ch_read;
+    let mut ch_write = ch_write;
+
+    let client_to_server = tokio::io::copy(&mut local_read, &mut ch_write);
+    let server_to_client = tokio::io::copy(&mut ch_read, &mut local_write);
+
+    tokio::select! {
+        r = client_to_server => { r.ok(); },
+        r = server_to_client => { r.ok(); },
     }
-
-    // Remove trailing blank lines
-    let trimmed = output.trim_end();
-    output = if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", trimmed)
-    };
-
-    // Append new korgi block if there are entries
-    if !entries.is_empty() {
-        output.push('\n');
-        output.push_str(KORGI_SSH_BEGIN);
-        output.push('\n');
-        for (name, entry) in entries {
-            output.push_str(&format!("# korgi:{}\n", name));
-            output.push_str(entry);
-        }
-        output.push_str(KORGI_SSH_END);
-        output.push('\n');
-    }
-
-    std::fs::write(path, &output)
-        .with_context(|| format!("Failed to write SSH config at {}", path.display()))?;
 
     Ok(())
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return format!("{}/{}", home, rest);
-    }
-    path.to_string()
 }
 
 #[cfg(test)]
@@ -555,29 +460,5 @@ mod tests {
             parse_image_ref("ghcr.io/org/team/app:latest"),
             ("ghcr.io/org/team/app", "latest")
         );
-    }
-
-    #[test]
-    fn test_expand_tilde_with_home() {
-        let result = expand_tilde("~/path/to/key");
-        // Should expand to $HOME/path/to/key
-        assert!(!result.starts_with("~/"));
-        assert!(result.ends_with("path/to/key"));
-    }
-
-    #[test]
-    fn test_expand_tilde_no_tilde() {
-        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
-    }
-
-    #[test]
-    fn test_expand_tilde_just_tilde() {
-        // "~" without "/" should not expand (only "~/" does)
-        assert_eq!(expand_tilde("~"), "~");
-    }
-
-    #[test]
-    fn test_expand_tilde_relative() {
-        assert_eq!(expand_tilde("relative/path"), "relative/path");
     }
 }

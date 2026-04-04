@@ -111,10 +111,6 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 async fn connect_docker_hosts(
     cfg: &korgi::config::types::Config,
 ) -> Result<HashMap<String, DockerHost>> {
-    // Sync SSH config for all hosts (handles non-standard ports/keys)
-    let host_refs: Vec<&korgi::config::types::HostConfig> = cfg.hosts.iter().collect();
-    korgi::docker::host::sync_ssh_config(&host_refs)?;
-
     let pb = output::spinner("Connecting to Docker on all hosts...");
     let mut hosts = HashMap::new();
 

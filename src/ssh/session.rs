@@ -63,22 +63,60 @@ impl SshSession {
             .await
             .with_context(|| format!("Failed to connect to {}", host.name))?;
 
-        // Authenticate with key file
-        if let Some(key_path) = &host.ssh_key {
-            let key_path = expand_tilde(key_path);
-            let key = russh_keys::load_secret_key(&key_path, None)
-                .with_context(|| format!("Failed to load SSH key: {}", key_path))?;
-            let authenticated = handle
+        // Resolve key paths to try: explicit config, then defaults
+        let key_paths: Vec<String> = if let Some(key_path) = &host.ssh_key {
+            vec![expand_tilde(key_path)]
+        } else {
+            default_key_paths()
+        };
+
+        let mut authenticated = false;
+
+        for key_path in &key_paths {
+            if !std::path::Path::new(key_path).exists() {
+                continue;
+            }
+
+            // Try without passphrase first
+            let key = match russh_keys::load_secret_key(key_path, None) {
+                Ok(key) => key,
+                Err(_) => {
+                    // Key is encrypted -- prompt for passphrase
+                    let passphrase = prompt_passphrase(key_path)?;
+                    russh_keys::load_secret_key(key_path, Some(&passphrase))
+                        .with_context(|| format!("Failed to decrypt key: {}", key_path))?
+                }
+            };
+
+            match handle
                 .authenticate_publickey(&host.user, Arc::new(key))
                 .await
-                .with_context(|| format!("SSH auth failed for {}", host.name))?;
-            if !authenticated {
-                anyhow::bail!("SSH public key authentication rejected by {}", host.name);
+            {
+                Ok(true) => {
+                    debug!("Authenticated with key {}", key_path);
+                    authenticated = true;
+                    break;
+                }
+                Ok(false) => {
+                    debug!("Key {} rejected by server", key_path);
+                }
+                Err(e) => {
+                    debug!("Auth error with key {}: {}", key_path, e);
+                }
             }
-        } else {
+        }
+
+        if !authenticated {
+            let tried = if key_paths.is_empty() {
+                "no keys found".to_string()
+            } else {
+                key_paths.join(", ")
+            };
             anyhow::bail!(
-                "No ssh_key configured for host '{}'. SSH agent auth not yet supported.",
-                host.name
+                "SSH authentication failed for {}@{} (tried: {})",
+                host.user,
+                host.name,
+                tried
             );
         }
 
@@ -147,6 +185,25 @@ impl SshSession {
         }
     }
 
+    /// Open a direct-streamlocal channel to a Unix socket on the remote host.
+    /// Used to tunnel to the Docker daemon socket.
+    pub async fn open_direct_streamlocal(
+        &self,
+        remote_socket: &str,
+    ) -> Result<russh::Channel<russh::client::Msg>> {
+        let channel = self
+            .handle
+            .channel_open_direct_streamlocal(remote_socket)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to open channel to {} on {}",
+                    remote_socket, self.host.name
+                )
+            })?;
+        Ok(channel)
+    }
+
     /// Close the SSH connection.
     pub async fn close(self) -> Result<()> {
         self.handle
@@ -165,4 +222,24 @@ fn expand_tilde(path: &str) -> String {
         return format!("{}/{}", home, rest);
     }
     path.to_string()
+}
+
+/// Default SSH key paths to try when no explicit key is configured.
+fn default_key_paths() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return vec![];
+    }
+    vec![
+        format!("{}/.ssh/id_ed25519", home),
+        format!("{}/.ssh/id_rsa", home),
+        format!("{}/.ssh/id_ecdsa", home),
+    ]
+}
+
+/// Prompt the user for an SSH key passphrase on stderr.
+fn prompt_passphrase(key_path: &str) -> Result<String> {
+    eprint!("Enter passphrase for {}: ", key_path);
+    let passphrase = rpassword::read_password().with_context(|| "Failed to read passphrase")?;
+    Ok(passphrase)
 }

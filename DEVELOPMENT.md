@@ -57,8 +57,8 @@ src/
 - **Cross-host routing via Traefik file provider** -- after deploy/scale/rollback/destroy, Korgi generates a dynamic YAML config and writes it into the Traefik container via `docker exec`. Traefik watches the file and updates routing automatically
 - **Host port binding** -- containers bind to host ports (`host_base + instance`) on the internal IP so Traefik can route to them across the network
 - **Public vs internal addresses** -- `address` is for SSH, `internal_address` is for Traefik routing. Falls back to `address` if `internal_address` is not set
-- **bollard `connect_with_ssh()`** for Docker API -- not a custom SSH transport
-- **russh** used separately for SSH command exec (`check`, `exec` commands)
+- **Pure Rust SSH via russh** -- russh establishes SSH sessions, opens `direct-streamlocal` channels to the remote Docker socket. A local Unix socket proxy bridges bollard to the channel. No system `ssh` binary needed.
+- **SSH auth** -- tries key files (explicit or default `~/.ssh/id_{ed25519,rsa,ecdsa}`), prompts for passphrase if encrypted. Uses `rpassword` for hidden input.
 - **Docker HEALTHCHECK** polled via `docker inspect`, not HTTP probing from local machine
 - **Generation-based versioning** -- containers tagged with monotonic generation numbers for rollback
 

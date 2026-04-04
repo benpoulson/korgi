@@ -21,7 +21,7 @@ russh = "0.48"
 russh-keys = "0.48"
 
 # Docker
-bollard = { version = "0.20", features = ["ssh"] }
+bollard = "0.20"
 
 # Errors
 thiserror = "2"
@@ -40,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 ssh-key = "0.6"
 async-trait = "0.1"
+rpassword = "7.4.0"
 
 [profile.release]
 opt-level = "z"     # optimize for size
