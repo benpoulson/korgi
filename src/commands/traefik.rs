@@ -66,6 +66,18 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
                 "--certificatesresolvers.letsencrypt.acme.storage={}",
                 acme.storage
             ));
+
+            // Auto-redirect HTTP to HTTPS when ACME is configured
+            if traefik.entrypoints.contains_key("web")
+                && traefik.entrypoints.contains_key("websecure")
+            {
+                cmd.push(
+                    "--entrypoints.web.http.redirections.entrypoint.to=websecure".to_string(),
+                );
+                cmd.push(
+                    "--entrypoints.web.http.redirections.entrypoint.scheme=https".to_string(),
+                );
+            }
         }
 
         // Port bindings
