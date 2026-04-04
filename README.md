@@ -12,31 +12,43 @@ Korgi fills the gap between Docker Compose (single host) and Kubernetes (too com
 
 - **Multi-host deployments** over SSH -- no agents or daemons on your servers
 - **Zero-downtime deploys** -- blue-green with automatic Traefik routing
-- **Traefik integration** -- automatic load balancer configuration via Docker labels
+- **Cross-host load balancing** -- dedicated Traefik entrypoint routes to containers on worker hosts
 - **Health checking** -- Docker HEALTHCHECK with automatic rollback on failure
 - **Scaling** -- scale services up and down across hosts
 - **Generation-based rollback** -- instant rollback to previous versions
 - **Declarative config** -- define your infrastructure in a single TOML file
 - **Single binary** -- no runtime dependencies (just SSH and Docker on your hosts)
 
-## How It Works
+## Architecture
+
+Korgi supports a dedicated load balancer host that routes traffic to containers running on internal worker hosts:
 
 ```
-Your laptop / CI                     Your servers
-┌─────────────┐                      ┌─────────────┐
-│             │         SSH          │   Host A    │
-│   korgi     │──────────────────────│  Traefik    │
-│   binary    │                      │  api-g3-0   │
-│             │         SSH          │  api-g3-1   │
-│             │──────────────────────├─────────────┤
-│             │                      │   Host B    │
-└─────────────┘                      │  Traefik    │
-                                     │  api-g3-2   │
-                                     │  worker-g2-0│
-                                     └─────────────┘
+           Internet
+              │
+              ▼
+        ┌───────────┐
+        │  lb host   │  Public IP: 203.0.113.1
+        │  Traefik   │  Runs Traefik only -- no app containers
+        │  :80 :443  │  Routes via file provider to workers
+        └──────┬─────┘
+               │ internal network
+       ┌───────┴────────┐
+       ▼                ▼
+ ┌───────────┐    ┌───────────┐
+ │ worker-1  │    │ worker-2  │
+ │ 10.0.0.10 │    │ 10.0.0.11 │
+ │           │    │           │
+ │ api-g3-0  │    │ api-g3-1  │
+ │ :9001     │    │ :9002     │
+ │ api-g3-2  │    │ api-g3-3  │
+ │ :9003     │    │ :9004     │
+ └───────────┘    └───────────┘
 ```
 
-Korgi SSHs into your hosts, talks to Docker via the Docker API, and manages Traefik routing through container labels. No state files -- container labels are the source of truth.
+Korgi SSHs into all hosts, manages containers via the Docker API, and automatically generates Traefik routing config after every deploy, scale, or rollback. No state files -- container labels are the source of truth.
+
+You can also run Traefik on every host (co-located mode) if you prefer -- the entrypoint/worker split is optional.
 
 ## Quick Start
 
@@ -65,35 +77,47 @@ This creates a `korgi.toml` template. Edit it with your hosts and services:
 [project]
 name = "myapp"
 
+# --- Entrypoint host (runs Traefik, faces the internet) ---
 [[hosts]]
-name = "web1"
-address = "192.168.1.10"
+name = "lb"
+address = "203.0.113.1"            # public IP (SSH connects here)
+internal_address = "10.0.0.1"      # private IP (Traefik routes via this)
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
-labels = ["web"]
+# No "app" label = no app containers placed here
+
+# --- Worker hosts (run containers, internal only) ---
+[[hosts]]
+name = "worker-1"
+address = "10.0.0.10"
+internal_address = "10.0.0.10"
+user = "deploy"
+ssh_key = "~/.ssh/id_ed25519"
+labels = ["app"]
 
 [[hosts]]
-name = "web2"
-address = "192.168.1.11"
+name = "worker-2"
+address = "10.0.0.11"
+internal_address = "10.0.0.11"
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
-labels = ["web"]
+labels = ["app"]
 
 [traefik]
 image = "traefik:v3.2"
-hosts = ["web1", "web2"]
+hosts = ["lb"]                     # Traefik only on the entrypoint host
 entrypoints = { web = ":80", websecure = ":443" }
 network = "korgi-traefik"
 
-# [traefik.acme]
-# email = "admin@example.com"
-# storage = "/letsencrypt/acme.json"
+[traefik.acme]
+email = "admin@example.com"
+storage = "/letsencrypt/acme.json"
 
 [[services]]
 name = "api"
 image = "myapp/api:latest"
-replicas = 3
-placement_labels = ["web"]
+replicas = 4
+placement_labels = ["app"]         # Only placed on worker hosts
 
 [services.health]
 path = "/health"
@@ -109,6 +133,7 @@ tls = true
 
 [services.ports]
 container = 8080
+host_base = 9001                   # Workers expose 9001, 9002, ... for Traefik
 
 [services.deploy]
 drain_seconds = 30
@@ -126,21 +151,20 @@ Tests SSH connectivity and Docker access on all configured hosts.
 ### Deploy
 
 ```sh
-# Deploy Traefik first
+# Deploy Traefik first (generates routing config automatically)
 korgi traefik deploy
 
 # Deploy all services
 korgi deploy
 
-# Deploy a specific service
-korgi deploy --service api
-
-# Deploy with an image override (useful in CI)
+# Deploy a specific service with an image override (useful in CI)
 korgi deploy --service api --image myapp/api:v2.1
 
 # Preview what would happen
 korgi deploy --dry-run
 ```
+
+After each deploy, Korgi automatically syncs the Traefik routing config with the new container topology.
 
 ### Monitor
 
@@ -158,7 +182,7 @@ korgi logs --service api --follow
 ### Scale
 
 ```sh
-korgi scale --service api 5
+korgi scale --service api 8
 ```
 
 ### Rollback
@@ -191,16 +215,77 @@ All commands accept `--env <name>` (load `korgi.<name>.toml` overlay), `--config
 ## Zero-Downtime Deploy Pipeline
 
 ```
-1. PREPARE     → query live state, compute placement
-2. PULL        → pull image on target hosts (parallel)
-3. START GREEN → create new containers with Traefik labels
+1. PREPARE      → query live state, compute placement
+2. PULL         → pull image on target hosts
+3. START GREEN  → create new containers with host port bindings
 4. HEALTH CHECK → wait for Docker HEALTHCHECK to pass
-   └─ on failure → stop & remove new containers, abort
-5. DRAIN OLD   → gracefully stop previous generation
-6. CLEANUP     → remove containers beyond rollback_keep
+   └─ failure   → stop & remove new containers, abort
+5. DRAIN OLD    → gracefully stop previous generation
+6. CLEANUP      → remove containers beyond rollback_keep
+7. SYNC CONFIG  → regenerate Traefik routing config
 ```
 
 The old generation is **never touched** until the new one is confirmed healthy. If health checks fail, the new containers are removed and the old ones keep serving traffic.
+
+## Cross-Host Load Balancing
+
+Korgi uses two mechanisms for Traefik routing:
+
+- **Docker provider** -- Traefik discovers containers on its own host via the Docker socket
+- **File provider** -- Korgi generates a dynamic YAML config listing all backends across all hosts by `internal_ip:host_port`, and writes it into the Traefik container
+
+After every `deploy`, `scale`, `rollback`, or `destroy`, Korgi regenerates the config:
+
+```yaml
+# Generated by korgi -- do not edit manually
+http:
+  routers:
+    myapp-api:
+      rule: "Host(`api.example.com`)"
+      service: myapp-api
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+  services:
+    myapp-api:
+      loadBalancer:
+        servers:
+          - url: "http://10.0.0.10:9001"
+          - url: "http://10.0.0.11:9002"
+          - url: "http://10.0.0.10:9003"
+          - url: "http://10.0.0.11:9004"
+        healthCheck:
+          path: /health
+          interval: 5s
+          timeout: 3s
+```
+
+Traefik watches this file for changes and updates routing automatically.
+
+### Host Configuration
+
+Each host has two addresses:
+
+```toml
+[[hosts]]
+name = "worker-1"
+address = "203.0.113.10"           # public -- used for SSH connections
+internal_address = "10.0.0.10"     # private -- used for Traefik routing
+port = 22                          # SSH port (default: 22)
+```
+
+If `internal_address` is not set, `address` is used for both SSH and routing.
+
+### Port Allocation
+
+Containers bind to host ports so Traefik can reach them across the network:
+
+```toml
+[services.ports]
+container = 8080       # port inside the container
+host_base = 9001       # instance 0 → 9001, instance 1 → 9002, ...
+```
 
 ## Configuration
 
@@ -223,7 +308,7 @@ Reference environment variables with `${VAR}`:
 DATABASE_URL = "${DATABASE_URL}"
 ```
 
-Unset variables cause a hard error -- Korgi never deploys with empty credentials.
+Unset variables cause a hard error -- Korgi never deploys with empty credentials. Variables in TOML comments are ignored.
 
 ### Private Registries
 
@@ -253,14 +338,14 @@ readonly = false
 
 ### Services Without Routing
 
-Background workers without a `[services.routing]` section get no Traefik labels and aren't exposed:
+Background workers without a `[services.routing]` section get no Traefik config and aren't exposed:
 
 ```toml
 [[services]]
 name = "worker"
 image = "myapp/worker:latest"
 replicas = 2
-placement_labels = ["web"]
+placement_labels = ["app"]
 ```
 
 ## State Management
@@ -286,6 +371,7 @@ Every command queries Docker on all hosts for the current state. This means:
 |-|-------|-------|----------------|------------|
 | Multi-host | 2-10 hosts | Yes | No | Yes |
 | Zero-downtime | Yes | Yes | No | Yes |
+| Cross-host LB | Yes | No | No | Yes |
 | No agents | Yes | Yes | N/A | No |
 | Proxy | Traefik | kamal-proxy | N/A | Ingress |
 | Scaling | Yes | Limited | No | Yes (HPA) |
@@ -299,7 +385,7 @@ Every command queries Docker on all hosts for the current state. This means:
 # Build
 cargo build
 
-# Run tests
+# Run tests (217 unit tests, no Docker needed)
 cargo test
 
 # Run with debug logging
@@ -307,6 +393,12 @@ RUST_LOG=debug cargo run -- status
 
 # Clippy
 cargo clippy
+
+# Integration tests (requires Docker)
+cd tests/integration
+./setup.sh       # start 2 DinD hosts with SSH
+./run_tests.sh   # full lifecycle test
+./teardown.sh    # clean up
 ```
 
 ## Architecture
