@@ -12,6 +12,7 @@ pub async fn run(
     service_filter: Option<&str>,
     image_override: Option<&str>,
     dry_run: bool,
+    auto_yes: bool,
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
     let services: Vec<_> = if let Some(name) = service_filter {
@@ -27,6 +28,20 @@ pub async fn run(
 
     if dry_run {
         output::info("Dry run mode -- no changes will be made");
+    }
+
+    if !dry_run {
+        let svc_names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
+        let host_count = config.node_hosts().len();
+        let msg = format!(
+            "Deploy {} to {} hosts?",
+            svc_names.join(", "),
+            host_count,
+        );
+        if !output::confirm(&msg, auto_yes) {
+            output::info("Cancelled");
+            return Ok(());
+        }
     }
 
     for svc in &services {

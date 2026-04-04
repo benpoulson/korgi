@@ -47,3 +47,22 @@ pub fn info(msg: &str) {
 pub fn header(msg: &str) {
     eprintln!("\n{}", style(msg).bold().underlined());
 }
+
+/// Prompt the user for confirmation. Returns true if they accept.
+/// If `auto_yes` is true, skips the prompt and returns true.
+pub fn confirm(msg: &str, auto_yes: bool) -> bool {
+    if auto_yes {
+        return true;
+    }
+
+    eprint!("{} {} ", style("?").cyan().bold(), msg);
+    eprint!("{} ", style("[y/N]").dim());
+
+    use std::io::{self, BufRead};
+    let mut input = String::new();
+    if io::stdin().lock().read_line(&mut input).is_err() {
+        return false;
+    }
+
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}

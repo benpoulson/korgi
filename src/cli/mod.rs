@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Skip confirmation prompts
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -317,5 +321,23 @@ mod tests {
     fn test_json_works_on_any_command() {
         let cli = parse(&["korgi", "deploy", "--json"]);
         assert!(cli.json);
+    }
+
+    #[test]
+    fn test_yes_flag() {
+        let cli = parse(&["korgi", "-y", "deploy"]);
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_yes_long_flag() {
+        let cli = parse(&["korgi", "--yes", "destroy"]);
+        assert!(cli.yes);
+    }
+
+    #[test]
+    fn test_no_yes_by_default() {
+        let cli = parse(&["korgi", "deploy"]);
+        assert!(!cli.yes);
     }
 }

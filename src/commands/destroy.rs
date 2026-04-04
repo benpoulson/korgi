@@ -10,6 +10,7 @@ use crate::orchestrator::state::LiveState;
 pub async fn run(
     config: &Config,
     service_filter: Option<&str>,
+    auto_yes: bool,
     docker_hosts: &HashMap<String, DockerHost>,
 ) -> Result<()> {
     let state = LiveState::query(docker_hosts, &config.project.name).await?;
@@ -28,11 +29,14 @@ pub async fn run(
     let desc = service_filter
         .map(|s| format!("service '{}'", s))
         .unwrap_or("all services".to_string());
-    output::info(&format!(
-        "Destroying {} containers for {}",
-        containers.len(),
-        desc
-    ));
+
+    if !output::confirm(
+        &format!("Destroy {} containers for {}?", containers.len(), desc),
+        auto_yes,
+    ) {
+        output::info("Cancelled");
+        return Ok(());
+    }
 
     let pb = output::progress_bar(containers.len() as u64, "Destroying containers");
     for container in &containers {

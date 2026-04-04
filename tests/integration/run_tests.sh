@@ -35,28 +35,28 @@ fi
 # --- Check ---
 echo "--- Check ---"
 run_test "korgi check validates config and connectivity" \
-    $KORGI --config $CONFIG check
+    $KORGI --config $CONFIG -y check
 
 # --- Status (empty) ---
 echo "--- Status ---"
 run_test "korgi status works with no containers" \
-    $KORGI --config $CONFIG status
+    $KORGI --config $CONFIG -y status
 
 # --- Traefik Deploy ---
 echo "--- Traefik ---"
 run_test "korgi traefik deploy" \
-    $KORGI --config $CONFIG traefik deploy
+    $KORGI --config $CONFIG -y traefik deploy
 
 run_test "korgi traefik status shows running" \
-    $KORGI --config $CONFIG traefik status
+    $KORGI --config $CONFIG -y traefik status
 
 # --- Deploy ---
 echo "--- Deploy ---"
 run_test "korgi deploy (first deploy)" \
-    $KORGI --config $CONFIG deploy
+    $KORGI --config $CONFIG -y deploy
 
 echo -n "  TEST: korgi status shows containers after deploy ... "
-STATUS_OUT=$(timeout 30 $KORGI --config $CONFIG status 2>&1 || true)
+STATUS_OUT=$(timeout 30 $KORGI --config $CONFIG -y status 2>&1 || true)
 CONTAINER_COUNT=$(echo "$STATUS_OUT" | grep -c "web" || true)
 if [ "$CONTAINER_COUNT" -ge 3 ]; then
     echo "PASS ($CONTAINER_COUNT containers)"
@@ -70,30 +70,30 @@ fi
 # --- Scale ---
 echo "--- Scale ---"
 run_test "korgi scale up to 5" \
-    $KORGI --config $CONFIG scale --service web 5
+    $KORGI --config $CONFIG -y scale --service web 5
 
 run_test "korgi scale down to 2" \
-    $KORGI --config $CONFIG scale --service web 2
+    $KORGI --config $CONFIG -y scale --service web 2
 
 # --- Deploy v2 (zero-downtime) ---
 echo "--- Zero-downtime deploy ---"
 run_test "korgi deploy with image override (v2)" \
-    $KORGI --config $CONFIG deploy --service web --image nginx:1.27-alpine
+    $KORGI --config $CONFIG -y deploy --service web --image nginx:1.27-alpine
 
 # --- Rollback ---
 echo "--- Rollback ---"
 run_test "korgi rollback" \
-    $KORGI --config $CONFIG rollback --service web
+    $KORGI --config $CONFIG -y rollback --service web
 
 # --- Exec ---
 echo "--- Exec ---"
 run_test "korgi exec runs command in container" \
-    $KORGI --config $CONFIG exec --service web -- echo hello
+    $KORGI --config $CONFIG -y exec --service web -- echo hello
 
 # --- Logs ---
 echo "--- Logs ---"
 echo -n "  TEST: korgi logs shows output ... "
-LOGS_OUT=$(timeout 10 $KORGI --config $CONFIG logs --service web 2>&1 || true)
+LOGS_OUT=$(timeout 10 $KORGI --config $CONFIG -y logs --service web 2>&1 || true)
 if [ -n "$LOGS_OUT" ]; then
     echo "PASS"
     passed=$((passed + 1))
@@ -105,10 +105,10 @@ fi
 # --- Destroy ---
 echo "--- Destroy ---"
 run_test "korgi destroy removes all containers" \
-    $KORGI --config $CONFIG destroy
+    $KORGI --config $CONFIG -y destroy
 
 echo -n "  TEST: korgi status shows 0 containers after destroy ... "
-STATUS_AFTER=$(timeout 30 $KORGI --config $CONFIG status 2>&1 || true)
+STATUS_AFTER=$(timeout 30 $KORGI --config $CONFIG -y status 2>&1 || true)
 if echo "$STATUS_AFTER" | grep -q "No containers"; then
     echo "PASS"
     passed=$((passed + 1))

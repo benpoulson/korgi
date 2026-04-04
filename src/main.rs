@@ -63,6 +63,7 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
                 service.as_deref(),
                 image.as_deref(),
                 *dry_run,
+                cli.yes,
                 &docker_hosts,
             )
             .await?;
@@ -70,12 +71,12 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 
         Commands::Rollback { service } => {
             let docker_hosts = connect_docker_hosts(&cfg).await?;
-            korgi::commands::rollback::run(&cfg, service, &docker_hosts).await?;
+            korgi::commands::rollback::run(&cfg, service, cli.yes, &docker_hosts).await?;
         }
 
         Commands::Scale { service, count } => {
             let docker_hosts = connect_docker_hosts(&cfg).await?;
-            korgi::commands::scale::run(&cfg, service, *count, &docker_hosts).await?;
+            korgi::commands::scale::run(&cfg, service, *count, cli.yes, &docker_hosts).await?;
         }
 
         Commands::Traefik { action } => {
@@ -105,7 +106,7 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 
         Commands::Destroy { service } => {
             let docker_hosts = connect_docker_hosts(&cfg).await?;
-            korgi::commands::destroy::run(&cfg, service.as_deref(), &docker_hosts).await?;
+            korgi::commands::destroy::run(&cfg, service.as_deref(), cli.yes, &docker_hosts).await?;
         }
     }
 
@@ -116,6 +117,10 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
 async fn connect_docker_hosts(
     cfg: &korgi::config::types::Config,
 ) -> Result<HashMap<String, DockerHost>> {
+    // Sync SSH config for all hosts (handles non-standard ports/keys)
+    let host_refs: Vec<&korgi::config::types::HostConfig> = cfg.hosts.iter().collect();
+    korgi::docker::host::sync_ssh_config(&host_refs)?;
+
     let pb = output::spinner("Connecting to Docker on all hosts...");
     let mut hosts = HashMap::new();
 
