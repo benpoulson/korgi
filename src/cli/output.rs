@@ -78,7 +78,7 @@ pub fn multi_select(prompt: &str, items: &[&str], auto_yes: bool) -> Vec<usize> 
     use console::Term;
     let term = Term::stderr();
 
-    let mut selected: Vec<bool> = vec![true; items.len()]; // all selected by default
+    let mut selected: Vec<bool> = vec![false; items.len()]; // none selected by default
     let mut cursor: usize = 0;
 
     eprintln!(
