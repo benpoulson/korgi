@@ -218,9 +218,24 @@ fn default_restart() -> String {
     "unless-stopped".to_string()
 }
 
+/// Health check mode: "docker" runs a command inside the container,
+/// "http" has korgi poll the endpoint via the host port from outside.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthMode {
+    /// Docker HEALTHCHECK (runs command inside container). Requires shell in image.
+    #[default]
+    Docker,
+    /// HTTP poll from korgi via host_base port. Works with FROM scratch images.
+    Http,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
     pub path: String,
+    /// "docker" (default) or "http". Use "http" for FROM scratch images with no shell.
+    #[serde(default)]
+    pub mode: HealthMode,
     #[serde(default = "default_health_interval")]
     pub interval: String,
     #[serde(default = "default_health_timeout")]

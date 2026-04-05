@@ -1,3 +1,3 @@
 pub mod checker;
 
-pub use checker::wait_healthy;
+pub use checker::{HttpHealthCheck, wait_healthy};

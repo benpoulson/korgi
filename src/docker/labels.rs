@@ -574,6 +574,7 @@ mod tests {
             entrypoint: None,
             restart: "unless-stopped".to_string(),
             health: Some(HealthConfig {
+                mode: Default::default(),
                 path: "/ready".to_string(),
                 interval: "10s".to_string(),
                 timeout: "5s".to_string(),

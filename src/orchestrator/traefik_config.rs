@@ -195,6 +195,7 @@ mod tests {
                     host_base: Some(9001),
                 });
                 svc.health = Some(HealthConfig {
+                    mode: Default::default(),
                     path: "/health".to_string(),
                     interval: "10s".to_string(),
                     timeout: "3s".to_string(),

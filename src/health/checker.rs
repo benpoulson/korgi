@@ -4,8 +4,83 @@ use tracing::debug;
 
 use crate::docker::traits::DockerHostApi;
 
-/// Wait for a container to become healthy by polling docker inspect.
+/// Wait for a container to become healthy.
+/// For mode=docker: polls Docker HEALTHCHECK status via inspect.
+/// For mode=http: polls the health endpoint via the host port from outside.
 pub async fn wait_healthy<D: DockerHostApi>(
+    docker: &D,
+    container_id: &str,
+    timeout: Duration,
+    http_check: Option<HttpHealthCheck<'_>>,
+) -> Result<()> {
+    if let Some(check) = http_check {
+        return wait_healthy_http(docker, container_id, timeout, &check).await;
+    }
+    wait_healthy_docker(docker, container_id, timeout).await
+}
+
+/// Info needed for HTTP-mode health checks.
+pub struct HttpHealthCheck<'a> {
+    pub url: String,
+    pub interval: Duration,
+    pub host_name: &'a str,
+}
+
+/// HTTP health check -- korgi polls the endpoint directly.
+async fn wait_healthy_http<D: DockerHostApi>(
+    docker: &D,
+    container_id: &str,
+    timeout: Duration,
+    check: &HttpHealthCheck<'_>,
+) -> Result<()> {
+    let start = Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+
+    loop {
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "Container {} did not become healthy within {}s (HTTP check: {})",
+                container_id,
+                timeout.as_secs(),
+                check.url,
+            );
+        }
+
+        // Verify container is still running
+        let inspect = docker.inspect_container(container_id).await?;
+        if let Some(state) = &inspect.state
+            && state.running == Some(false)
+        {
+            anyhow::bail!("Container {} exited on {}", container_id, check.host_name);
+        }
+
+        // Try HTTP request
+        match client.get(&check.url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                debug!(
+                    "Container {} healthy after {:.1}s (HTTP {})",
+                    container_id,
+                    start.elapsed().as_secs_f64(),
+                    resp.status()
+                );
+                return Ok(());
+            }
+            Ok(resp) => {
+                debug!("Health check {}: HTTP {}", check.url, resp.status());
+            }
+            Err(e) => {
+                debug!("Health check {}: {}", check.url, e);
+            }
+        }
+
+        tokio::time::sleep(check.interval).await;
+    }
+}
+
+/// Docker HEALTHCHECK mode -- polls container inspect status.
+async fn wait_healthy_docker<D: DockerHostApi>(
     docker: &D,
     container_id: &str,
     timeout: Duration,
@@ -91,7 +166,7 @@ mod tests {
         let mock = MockDockerHost::new("web1");
         mock.set_health_status(Some(HealthStatusEnum::HEALTHY));
 
-        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5), None).await;
         assert!(result.is_ok());
     }
 
@@ -100,7 +175,7 @@ mod tests {
         let mock = MockDockerHost::new("web1");
         mock.set_health_status(Some(HealthStatusEnum::UNHEALTHY));
 
-        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unhealthy"));
     }
@@ -111,7 +186,7 @@ mod tests {
         mock.set_container_running(false);
         mock.set_health_status(Some(HealthStatusEnum::HEALTHY));
 
-        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exited"));
     }
@@ -121,7 +196,7 @@ mod tests {
         let mock = MockDockerHost::new("web1");
         mock.set_health_status(None); // No health check configured
 
-        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5)).await;
+        let result = wait_healthy(&mock, "container-1", Duration::from_secs(5), None).await;
         assert!(
             result.is_ok(),
             "Container without healthcheck should be treated as healthy if running"

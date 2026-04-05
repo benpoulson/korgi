@@ -40,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 async-trait = "0.1"
 rpassword = "7.4.0"
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls"] }
 
 [profile.release]
 opt-level = "z"     # optimize for size

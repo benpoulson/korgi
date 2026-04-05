@@ -93,9 +93,14 @@ pub fn build_container_config(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
-    let healthcheck = svc.health.as_ref().map(|h| {
+    // Only set Docker HEALTHCHECK for mode=docker. Mode=http is checked by korgi externally.
+    let healthcheck = svc.health.as_ref().and_then(|h| {
+        use crate::config::types::HealthMode;
+        if h.mode == HealthMode::Http {
+            return None;
+        }
         let port = svc.ports.as_ref().map(|p| p.container).unwrap_or(80);
-        bollard::models::HealthConfig {
+        Some(bollard::models::HealthConfig {
             test: Some(vec![
                 "CMD-SHELL".to_string(),
                 format!(
@@ -108,7 +113,7 @@ pub fn build_container_config(
             retries: Some(h.retries as i64),
             start_period: h.start_period.as_ref().map(|sp| parse_duration_ns(sp)),
             start_interval: None,
-        }
+        })
     });
 
     let mut binds = Vec::new();
@@ -437,6 +442,7 @@ mod tests {
             host_base: None,
         });
         svc.health = Some(HealthConfig {
+            mode: Default::default(),
             path: "/ready".to_string(),
             interval: "10s".to_string(),
             timeout: "5s".to_string(),

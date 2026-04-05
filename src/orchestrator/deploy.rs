@@ -138,13 +138,36 @@ pub async fn deploy_service<D: DockerHostApi>(
     ));
 
     // Phase 4: HEALTH CHECK
-    if svc.health.is_some() {
+    if let Some(health_cfg) = &svc.health {
         let pb = output::spinner("Waiting for health checks...");
         let timeout = std::time::Duration::from_secs(deploy_cfg.drain_seconds * 2);
 
-        for (host_name, container_id) in &new_container_ids {
+        for (idx, (host_name, container_id)) in new_container_ids.iter().enumerate() {
             let docker = docker_hosts.get(host_name).unwrap();
-            match health::wait_healthy(docker, container_id, timeout).await {
+
+            // Build HTTP check info if mode=http
+            let http_check = if health_cfg.mode == crate::config::types::HealthMode::Http {
+                let host_cfg = config.hosts.iter().find(|h| &h.name == host_name);
+                let addr = host_cfg.map(|h| h.internal_addr()).unwrap_or("127.0.0.1");
+                let port = svc
+                    .ports
+                    .as_ref()
+                    .and_then(|p| {
+                        p.host_base
+                            .map(|base| base + placements[idx].1 as u16)
+                            .or(p.host)
+                    })
+                    .unwrap_or(svc.ports.as_ref().map(|p| p.container).unwrap_or(80));
+                Some(health::HttpHealthCheck {
+                    url: format!("http://{}:{}{}", addr, port, health_cfg.path),
+                    interval: std::time::Duration::from_secs(2),
+                    host_name,
+                })
+            } else {
+                None
+            };
+
+            match health::wait_healthy(docker, container_id, timeout, http_check).await {
                 Ok(()) => {
                     debug!("Container {} healthy on {}", container_id, host_name);
                 }
@@ -453,6 +476,7 @@ mod tests {
     async fn test_deploy_health_check_failure_cleans_up() {
         let mut config = test_config();
         config.services[0].health = Some(HealthConfig {
+            mode: Default::default(),
             path: "/health".to_string(),
             interval: "1s".to_string(),
             timeout: "1s".to_string(),
