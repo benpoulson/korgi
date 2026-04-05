@@ -105,9 +105,9 @@ Two `[[services]]` entries have the same `name`.
 
 ### "[traefik] is configured but no hosts have role = "lb""
 
-The `[traefik]` section exists but no host has `role = "lb"`.
+The `[traefik]` section exists but no host has `role = "lb"` or `role = "both"`.
 
-**Fix**: Add `role = "lb"` to at least one host.
+**Fix**: Add `role = "lb"` or `role = "both"` to at least one host.
 
 ## Debug logging
 

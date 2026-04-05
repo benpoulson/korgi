@@ -17,10 +17,23 @@ Docker orchestration across multiple hosts via SSH. Zero-downtime deployments, T
 
 ## Architecture
 
+**Single server** (`role = "both"`):
+
 ```
-           Internet
-              |
-              v
+        +-----------+
+        |  server   |  role = "both"
+        |  Traefik  |  Traefik + containers on one machine
+        |  :80 :443 |
+        |           |
+        | api-g3-0  |
+        | api-g3-1  |
+        | worker-0  |
+        +-----------+
+```
+
+**Multi-server** (dedicated LB + workers):
+
+```
         +-----------+
         |  lb host   |  role = "lb"
         |  Traefik   |  Routes to workers via file provider

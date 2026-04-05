@@ -22,7 +22,7 @@ Define one or more hosts. Each host is either a load balancer or a worker node.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | | Unique host identifier. |
-| `role` | `"lb"` / `"node"` | no | `"node"` | `lb` runs Traefik. `node` runs containers. |
+| `role` | `"lb"` / `"node"` / `"both"` | no | `"node"` | `lb` runs Traefik only. `node` runs containers only. `both` runs Traefik and containers. |
 | `address` | string | yes | | SSH address (public/external IP or hostname). |
 | `internal_address` | string | no | same as `address` | Internal IP for Traefik routing and inter-host traffic. |
 | `user` | string | no | `"root"` | SSH username. |
@@ -51,8 +51,9 @@ labels = ["app", "gpu"]
 
 ### Host roles
 
-- **`role = "lb"`** -- Traefik is deployed here automatically. No app containers unless it also has matching placement labels.
-- **`role = "node"`** (default) -- runs application containers. Traefik is not deployed here.
+- **`role = "lb"`** -- Traefik only. No app containers.
+- **`role = "node"`** (default) -- App containers only. No Traefik.
+- **`role = "both"`** -- Traefik and app containers on the same host. Ideal for single-server deployments.
 
 ## `[traefik]`
 

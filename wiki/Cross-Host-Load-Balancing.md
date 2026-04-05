@@ -102,13 +102,18 @@ name = "api"
 placement_labels = ["app"]  # only on workers, not on lb
 ```
 
-## Co-located mode
+## Single-server mode
 
-If your LB host also has matching placement labels, it runs containers too:
+For single-server deployments, use `role = "both"` to run Traefik and containers on the same host:
 
 ```toml
 [[hosts]]
 name = "server-1"
-role = "lb"
-labels = ["app"]  # Traefik AND containers on the same host
+role = "both"
+address = "85.10.193.55"
+internal_address = "85.10.193.55"
+user = "root"
+labels = ["app"]
 ```
+
+No need to define the host twice. Traefik and all containers share the same machine.

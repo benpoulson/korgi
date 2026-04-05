@@ -17,23 +17,26 @@ Edit `korgi.toml` with your hosts, services, and Traefik settings:
 name = "myapp"
 secrets = ".korgi-secrets"
 
-# Load balancer
+# Single server (Traefik + containers)
 [[hosts]]
-name = "lb"
-role = "lb"
+name = "server-1"
+role = "both"
 address = "203.0.113.1"
-internal_address = "10.0.0.1"
-user = "deploy"
-ssh_key = "~/.ssh/id_ed25519"
-
-# Worker node
-[[hosts]]
-name = "worker-1"
-address = "10.0.0.10"
-internal_address = "10.0.0.10"
+internal_address = "203.0.113.1"
 user = "deploy"
 ssh_key = "~/.ssh/id_ed25519"
 labels = ["app"]
+
+# Or split across multiple servers:
+# [[hosts]]
+# name = "lb"
+# role = "lb"
+# address = "203.0.113.1"
+#
+# [[hosts]]
+# name = "worker-1"
+# address = "10.0.0.10"
+# labels = ["app"]
 
 [traefik]
 image = "traefik:v3.2"
