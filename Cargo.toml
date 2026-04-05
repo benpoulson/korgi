@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["full"] }
 
 # SSH
 ssh2 = "0.9"
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Docker
 bollard = "0.20"
