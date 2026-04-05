@@ -22,7 +22,7 @@ jobs:
             os: ubuntu-latest
             artifact: korgi-linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             artifact: korgi-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
