@@ -16,7 +16,7 @@ serde_json = "1"
 # Async
 tokio = { version = "1", features = ["full"] }
 
-# SSH
+# SSH (vendored OpenSSL for cross-compilation)
 ssh2 = "0.9"
 openssl = { version = "0.10", features = ["vendored"] }
 
