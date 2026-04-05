@@ -66,15 +66,17 @@ impl RegistryConfig {
     }
 }
 
-/// Host role: load balancer (runs Traefik) or node (runs containers).
+/// Host role: load balancer, node, or both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostRole {
-    /// Load balancer -- runs Traefik, faces the internet. No app containers by default.
+    /// Load balancer only -- runs Traefik, no app containers.
     Lb,
-    /// Node -- runs application containers.
+    /// Node only -- runs app containers, no Traefik.
     #[default]
     Node,
+    /// Both load balancer and node -- runs Traefik and app containers.
+    Both,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,11 +105,11 @@ pub struct HostConfig {
 
 impl HostConfig {
     pub fn is_lb(&self) -> bool {
-        self.role == HostRole::Lb
+        matches!(self.role, HostRole::Lb | HostRole::Both)
     }
 
     pub fn is_node(&self) -> bool {
-        self.role == HostRole::Node
+        matches!(self.role, HostRole::Node | HostRole::Both)
     }
 
     /// Returns the address to use for SSH connections (public/external).

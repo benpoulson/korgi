@@ -43,11 +43,8 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
         let _ = docker.remove_container(TRAEFIK_CONTAINER_NAME, true).await;
 
         // Build Traefik command args
+        // Korgi manages all routing via the file provider -- no Docker provider needed
         let mut cmd = vec![
-            "--providers.docker=true".to_string(),
-            "--providers.docker.exposedbydefault=false".to_string(),
-            format!("--providers.docker.network={}", traefik.network),
-            // File provider for cross-host routing (korgi writes dynamic config here)
             "--providers.file.directory=/etc/korgi/".to_string(),
             "--providers.file.watch=true".to_string(),
         ];
@@ -90,10 +87,7 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
         }
 
         let host_config = HostConfig {
-            binds: Some(vec![
-                "/var/run/docker.sock:/var/run/docker.sock:ro".to_string(),
-                "korgi-letsencrypt:/letsencrypt".to_string(),
-            ]),
+            binds: Some(vec!["korgi-letsencrypt:/letsencrypt".to_string()]),
             port_bindings: Some(port_bindings),
             restart_policy: Some(RestartPolicy {
                 name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
