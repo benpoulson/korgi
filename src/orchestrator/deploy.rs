@@ -14,13 +14,14 @@ use crate::orchestrator::placement;
 use crate::orchestrator::state::LiveState;
 
 /// Execute the zero-downtime deployment pipeline for a service.
+/// Returns the deployed generation number (needed for drain phase).
 pub async fn deploy_service<D: DockerHostApi>(
     config: &Config,
     svc: &ServiceConfig,
     image_override: Option<&str>,
     docker_hosts: &HashMap<String, D>,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     let image = image_override.unwrap_or(&svc.image);
     let deploy_cfg = Config::deploy_config(svc);
     let traefik_network = config
@@ -59,7 +60,7 @@ pub async fn deploy_service<D: DockerHostApi>(
                 labels::container_name(&config.project.name, &svc.name, generation, *instance);
             output::info(&format!("  {} on {}", name, host.name));
         }
-        return Ok(());
+        return Ok(None);
     }
 
     // Phase 2: PULL (parallel across unique hosts)
@@ -233,38 +234,54 @@ pub async fn deploy_service<D: DockerHostApi>(
         output::success("Start delay elapsed");
     }
 
-    // Phase 5: DRAIN OLD -- stop ALL running containers from previous generations
-    {
-        let old_containers: Vec<&KorgiContainer> = state
-            .service_containers(&svc.name)
-            .into_iter()
-            .filter(|c| c.generation < generation && c.state == "running")
-            .collect();
+    output::success(&format!(
+        "Deployed {} generation {} ({} replicas) -- awaiting Traefik sync before drain",
+        svc.name, generation, svc.replicas
+    ));
 
-        if !old_containers.is_empty() {
-            let pb = output::spinner(&format!(
-                "Draining {} old containers ({}s timeout)...",
-                old_containers.len(),
-                deploy_cfg.drain_seconds
-            ));
-            for container in &old_containers {
-                if let Some(docker) = docker_hosts.get(&container.host_name) {
-                    docker
-                        .stop_container(&container.id, deploy_cfg.drain_seconds as i64)
-                        .await
-                        .ok();
-                }
+    Ok(Some(generation))
+}
+
+/// Drain and clean up old containers for a service after Traefik has been synced.
+/// Call this AFTER syncing Traefik config so traffic is routed to new containers first.
+pub async fn drain_old_containers<D: DockerHostApi>(
+    config: &Config,
+    svc: &ServiceConfig,
+    current_generation: u64,
+    docker_hosts: &HashMap<String, D>,
+) -> Result<()> {
+    let deploy_cfg = Config::deploy_config(svc);
+    let state = LiveState::query(docker_hosts, &config.project.name).await?;
+
+    // Stop ALL running containers from previous generations
+    let old_containers: Vec<&KorgiContainer> = state
+        .service_containers(&svc.name)
+        .into_iter()
+        .filter(|c| c.generation < current_generation && c.state == "running")
+        .collect();
+
+    if !old_containers.is_empty() {
+        let pb = output::spinner(&format!(
+            "Draining {} old containers ({}s timeout)...",
+            old_containers.len(),
+            deploy_cfg.drain_seconds
+        ));
+        for container in &old_containers {
+            if let Some(docker) = docker_hosts.get(&container.host_name) {
+                docker
+                    .stop_container(&container.id, deploy_cfg.drain_seconds as i64)
+                    .await
+                    .ok();
             }
-            pb.finish_and_clear();
-            output::success(&format!("Drained {} old containers", old_containers.len()));
         }
+        pb.finish_and_clear();
+        output::success(&format!("Drained {} old containers", old_containers.len()));
     }
 
-    // Phase 6: CLEANUP old generations
-    // Phase 6: CLEANUP -- remove containers from old generations beyond rollback_keep
+    // Cleanup: remove containers beyond rollback_keep
     let keep_gens = deploy_cfg.rollback_keep;
-    if generation > keep_gens as u64 + 1 {
-        let cutoff = generation - keep_gens as u64 - 1;
+    if current_generation > keep_gens as u64 + 1 {
+        let cutoff = current_generation - keep_gens as u64 - 1;
         let to_remove: Vec<&KorgiContainer> = state
             .service_containers(&svc.name)
             .into_iter()
@@ -272,10 +289,8 @@ pub async fn deploy_service<D: DockerHostApi>(
             .collect();
 
         if !to_remove.is_empty() {
-            debug!("Cleaning up {} old containers", to_remove.len());
             for container in &to_remove {
                 if let Some(docker) = docker_hosts.get(&container.host_name) {
-                    // Stop if still running (may have been drained already)
                     if container.state == "running" {
                         docker.stop_container(&container.id, 5).await.ok();
                     }
@@ -285,11 +300,6 @@ pub async fn deploy_service<D: DockerHostApi>(
             output::info(&format!("Cleaned up {} old containers", to_remove.len()));
         }
     }
-
-    output::success(&format!(
-        "Deploy complete: {} generation {} ({} replicas)",
-        svc.name, generation, svc.replicas
-    ));
 
     Ok(())
 }
@@ -515,7 +525,13 @@ mod tests {
                 "Up 5 minutes (healthy)",
             ));
 
-        deploy_service(&config, svc, None, &hosts, false)
+        let generation = deploy_service(&config, svc, None, &hosts, false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Drain happens separately (after Traefik sync in real flow)
+        drain_old_containers(&config, svc, generation, &hosts)
             .await
             .unwrap();
 
@@ -658,7 +674,12 @@ mod tests {
                 "Up 5 minutes (healthy)",
             ));
 
-        deploy_service(&config, svc, None, &hosts, false)
+        let generation = deploy_service(&config, svc, None, &hosts, false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        drain_old_containers(&config, svc, generation, &hosts)
             .await
             .unwrap();
 

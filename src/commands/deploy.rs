@@ -5,7 +5,7 @@ use crate::cli::output;
 use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
-use crate::orchestrator::deploy::deploy_service;
+use crate::orchestrator::deploy::{deploy_service, drain_old_containers};
 
 pub async fn run(
     config: &Config,
@@ -40,17 +40,28 @@ pub async fn run(
         }
     }
 
+    // Phase A: Deploy all services (start new containers, health check)
+    let mut deployed: Vec<(&crate::config::types::ServiceConfig, u64)> = Vec::new();
     for svc in &services {
-        deploy_service(config, svc, image_override, docker_hosts, dry_run).await?;
+        if let Some(generation) =
+            deploy_service(config, svc, image_override, docker_hosts, dry_run).await?
+        {
+            deployed.push((svc, generation));
+        }
+    }
+
+    if !dry_run && !deployed.is_empty() {
+        // Phase B: Sync Traefik BEFORE draining -- routes traffic to new containers
+        sync_config::sync_traefik_config(config, docker_hosts).await?;
+
+        // Phase C: Drain old containers -- now safe, traffic already shifted
+        for (svc, generation) in &deployed {
+            drain_old_containers(config, svc, *generation, docker_hosts).await?;
+        }
     }
 
     if services.len() > 1 {
         output::success(&format!("All {} services deployed", services.len()));
-    }
-
-    // Sync Traefik routing config with new container topology
-    if !dry_run {
-        sync_config::sync_traefik_config(config, docker_hosts).await?;
     }
 
     Ok(())
