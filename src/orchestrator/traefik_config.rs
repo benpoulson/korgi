@@ -74,6 +74,28 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
                 .join("\n")
         );
 
+        // Load balancing strategy
+        if let Some(strategy) = routing.lb_strategy.as_ref() {
+            let traefik_strategy = match strategy.as_str() {
+                "roundrobin" => "wrr",
+                "leastconnections" => "p2c",
+                other => other,
+            };
+            service_yaml.push_str(&format!("\n        strategy: {}", traefik_strategy));
+        }
+
+        // Sticky sessions
+        if let Some(sticky) = &routing.sticky {
+            let cookie_name = sticky
+                .cookie_name
+                .clone()
+                .unwrap_or_else(|| format!("korgi_{}", svc_config.name));
+            service_yaml.push_str(&format!(
+                "\n        sticky:\n          cookie:\n            name: {}\n            secure: {}\n            httpOnly: {}",
+                cookie_name, sticky.secure, sticky.http_only
+            ));
+        }
+
         // Add health check if configured
         if let Some(health) = &svc_config.health {
             service_yaml.push_str(&format!(
@@ -185,6 +207,8 @@ mod tests {
                 svc.replicas = 3;
                 svc.placement_labels = vec!["web".to_string()];
                 svc.routing = Some(RoutingConfig {
+                    lb_strategy: None,
+                    sticky: None,
                     rule: "Host(`api.example.com`)".to_string(),
                     entrypoints: vec!["websecure".to_string()],
                     tls: true,
@@ -310,6 +334,8 @@ mod tests {
     fn test_generate_config_multiple_entrypoints() {
         let mut config = test_config();
         config.services[0].routing = Some(RoutingConfig {
+            lb_strategy: None,
+            sticky: None,
             rule: "Host(`api.example.com`)".to_string(),
             entrypoints: vec!["web".to_string(), "websecure".to_string()],
             tls: false,

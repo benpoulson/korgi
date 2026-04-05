@@ -106,10 +106,66 @@ pub fn traefik_labels(
         }
     }
 
+    // Load balancing strategy
+    if let Some(strategy) = &routing.lb_strategy {
+        labels.insert(
+            format!(
+                "traefik.http.services.{}.loadbalancer.strategy",
+                router_name
+            ),
+            map_lb_strategy(strategy),
+        );
+    }
+
+    // Sticky sessions
+    if let Some(sticky) = &routing.sticky {
+        let cookie_name = sticky
+            .cookie_name
+            .clone()
+            .unwrap_or_else(|| format!("korgi_{}", service));
+        labels.insert(
+            format!(
+                "traefik.http.services.{}.loadbalancer.sticky.cookie",
+                router_name
+            ),
+            "true".to_string(),
+        );
+        labels.insert(
+            format!(
+                "traefik.http.services.{}.loadbalancer.sticky.cookie.name",
+                router_name
+            ),
+            cookie_name,
+        );
+        labels.insert(
+            format!(
+                "traefik.http.services.{}.loadbalancer.sticky.cookie.secure",
+                router_name
+            ),
+            sticky.secure.to_string(),
+        );
+        labels.insert(
+            format!(
+                "traefik.http.services.{}.loadbalancer.sticky.cookie.httponly",
+                router_name
+            ),
+            sticky.http_only.to_string(),
+        );
+    }
+
     // Set the Docker network for Traefik to use
     labels.insert("traefik.docker.network".to_string(), network.to_string());
 
     labels
+}
+
+/// Map user-friendly LB strategy names to Traefik's internal names.
+fn map_lb_strategy(strategy: &str) -> String {
+    match strategy {
+        "roundrobin" => "wrr".to_string(),
+        "leastconnections" => "p2c".to_string(),
+        other => other.to_string(), // pass through for advanced users
+    }
 }
 
 /// Generate all labels for a container (metadata + traefik).
@@ -236,6 +292,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None,
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`api.example.com`)".to_string(),
                 entrypoints: vec!["websecure".to_string()],
                 tls: true,
@@ -399,6 +457,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None,
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`api.example.com`)".to_string(),
                 entrypoints: vec!["web".to_string()],
                 tls: false,
@@ -470,6 +530,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None,
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`secure.example.com`)".to_string(),
                 entrypoints: vec!["websecure".to_string()],
                 tls: true,
@@ -510,6 +572,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None,
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`example.com`)".to_string(),
                 entrypoints: vec!["web".to_string(), "websecure".to_string()],
                 tls: false,
@@ -542,6 +606,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None,
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`example.com`)".to_string(),
                 entrypoints: vec![],
                 tls: false,
@@ -582,6 +648,8 @@ mod tests {
                 start_period: None,
             }),
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`api.example.com`)".to_string(),
                 entrypoints: vec!["web".to_string()],
                 tls: false,
@@ -636,6 +704,8 @@ mod tests {
             restart: "unless-stopped".to_string(),
             health: None, // no health check
             routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
                 rule: "Host(`api.example.com`)".to_string(),
                 entrypoints: vec!["web".to_string()],
                 tls: false,
@@ -661,6 +731,178 @@ mod tests {
         assert!(
             labels
                 .get("traefik.http.services.proj-api.loadbalancer.healthcheck.path")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_with_sticky_sessions() {
+        use crate::config::types::StickyConfig;
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: Some(StickyConfig {
+                    cookie_name: Some("my_session".to_string()),
+                    secure: true,
+                    http_only: false,
+                }),
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec!["web".to_string()],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: None,
+            }),
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie.name")
+                .unwrap(),
+            "my_session"
+        );
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie.secure")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie.httponly")
+                .unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_sticky_default_cookie_name() {
+        use crate::config::types::StickyConfig;
+        let svc = ServiceConfig {
+            name: "websocket".to_string(),
+            image: "ws:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: Some(StickyConfig {
+                    cookie_name: None, // should default to korgi_websocket
+                    secure: true,
+                    http_only: true,
+                }),
+                rule: "Host(`ws.example.com`)".to_string(),
+                entrypoints: vec![],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "websocket", &svc, "net");
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-websocket.loadbalancer.sticky.cookie.name")
+                .unwrap(),
+            "korgi_websocket"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_with_lb_strategy() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                lb_strategy: Some("leastconnections".to_string()),
+                sticky: None,
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec![],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert_eq!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.strategy")
+                .unwrap(),
+            "p2c"
+        );
+    }
+
+    #[test]
+    fn test_traefik_labels_no_sticky_no_strategy_by_default() {
+        let svc = ServiceConfig {
+            name: "api".to_string(),
+            image: "api:latest".to_string(),
+            replicas: 1,
+            placement_labels: vec![],
+            command: None,
+            entrypoint: None,
+            restart: "unless-stopped".to_string(),
+            health: None,
+            routing: Some(RoutingConfig {
+                lb_strategy: None,
+                sticky: None,
+                rule: "Host(`api.example.com`)".to_string(),
+                entrypoints: vec![],
+                tls: false,
+            }),
+            env: HashMap::new(),
+            ports: None,
+            volumes: vec![],
+            resources: None,
+            deploy: None,
+        };
+
+        let labels = traefik_labels("proj", "api", &svc, "net");
+        assert!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie")
+                .is_none()
+        );
+        assert!(
+            labels
+                .get("traefik.http.services.proj-api.loadbalancer.strategy")
                 .is_none()
         );
     }

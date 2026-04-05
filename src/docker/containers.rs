@@ -556,6 +556,8 @@ mod tests {
     fn test_build_container_config_traefik_labels() {
         let mut svc = ServiceConfig::test_service("api", "api:v1");
         svc.routing = Some(RoutingConfig {
+            lb_strategy: None,
+            sticky: None,
             rule: "Host(`api.example.com`)".to_string(),
             entrypoints: vec!["web".to_string()],
             tls: false,

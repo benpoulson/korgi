@@ -267,6 +267,29 @@ pub struct RoutingConfig {
     pub entrypoints: Vec<String>,
     #[serde(default)]
     pub tls: bool,
+    /// Load balancing strategy: "roundrobin" (default) or "leastconnections".
+    #[serde(default)]
+    pub lb_strategy: Option<String>,
+    /// Sticky session config. Presence enables sticky sessions.
+    #[serde(default)]
+    pub sticky: Option<StickyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StickyConfig {
+    /// Cookie name. Defaults to "korgi_{service}" at generation time.
+    #[serde(default)]
+    pub cookie_name: Option<String>,
+    /// Set Secure flag on the cookie.
+    #[serde(default = "default_true")]
+    pub secure: bool,
+    /// Set HttpOnly flag on the cookie.
+    #[serde(default = "default_true")]
+    pub http_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
