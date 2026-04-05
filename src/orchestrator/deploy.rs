@@ -233,13 +233,12 @@ pub async fn deploy_service<D: DockerHostApi>(
         output::success("Start delay elapsed");
     }
 
-    // Phase 5: DRAIN OLD
-    let old_generation = generation.checked_sub(1);
-    if let Some(old_gen) = old_generation {
+    // Phase 5: DRAIN OLD -- stop ALL running containers from previous generations
+    {
         let old_containers: Vec<&KorgiContainer> = state
-            .generation_containers(&svc.name, old_gen)
+            .service_containers(&svc.name)
             .into_iter()
-            .filter(|c| c.state == "running")
+            .filter(|c| c.generation < generation && c.state == "running")
             .collect();
 
         if !old_containers.is_empty() {
@@ -262,19 +261,24 @@ pub async fn deploy_service<D: DockerHostApi>(
     }
 
     // Phase 6: CLEANUP old generations
+    // Phase 6: CLEANUP -- remove containers from old generations beyond rollback_keep
     let keep_gens = deploy_cfg.rollback_keep;
     if generation > keep_gens as u64 + 1 {
         let cutoff = generation - keep_gens as u64 - 1;
         let to_remove: Vec<&KorgiContainer> = state
             .service_containers(&svc.name)
             .into_iter()
-            .filter(|c| c.generation <= cutoff && c.state != "running")
+            .filter(|c| c.generation <= cutoff)
             .collect();
 
         if !to_remove.is_empty() {
             debug!("Cleaning up {} old containers", to_remove.len());
             for container in &to_remove {
                 if let Some(docker) = docker_hosts.get(&container.host_name) {
+                    // Stop if still running (may have been drained already)
+                    if container.state == "running" {
+                        docker.stop_container(&container.id, 5).await.ok();
+                    }
                     docker.remove_container(&container.id, true).await.ok();
                 }
             }
