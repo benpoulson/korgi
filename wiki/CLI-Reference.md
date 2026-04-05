@@ -48,16 +48,32 @@ korgi status --json
 Zero-downtime deployment. See [Deployment Pipeline](Deployment-Pipeline) for the full flow.
 
 ```sh
-korgi deploy                              # deploy all services
+korgi deploy                              # interactive service picker
 korgi deploy --service api                # deploy one service
 korgi deploy --service api --image v2.1   # override image
 korgi deploy --dry-run                    # preview only
-korgi -y deploy                           # skip confirmation
+korgi -y deploy                           # deploy all, skip prompts
 ```
+
+When multiple services are configured and no `--service` flag is given, korgi shows an interactive multi-select picker:
+
+```
+? Select services to deploy: (space=toggle, a=all, n=none, enter=confirm)
+> [ ] api
+  [ ] socket
+```
+
+- Arrow keys / `j`/`k` to navigate
+- Space to toggle selection
+- `a` to select all, `n` to deselect all
+- Enter to confirm, Escape to cancel
+- All services unchecked by default for safety
+
+With `-y` flag, all services are deployed without prompting.
 
 | Flag | Description |
 |------|-------------|
-| `--service <name>` | Deploy only this service. |
+| `--service <name>` | Deploy only this service (skips picker). |
 | `--image <ref>` | Override the image (useful in CI). |
 | `--dry-run` | Show what would happen without making changes. |
 

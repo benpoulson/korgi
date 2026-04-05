@@ -23,10 +23,12 @@ Korgi fills the gap between Docker Compose (single host) and Kubernetes (too com
 ## Features
 
 - **Multi-host deployments** over SSH -- no agents or daemons on your servers
-- **Zero-downtime deploys** -- blue-green with automatic Traefik routing
+- **Zero-downtime deploys** -- blue-green with Traefik sync before drain
 - **Cross-host load balancing** -- dedicated Traefik entrypoint routes to containers on worker hosts
-- **Health checking** -- Docker HEALTHCHECK with automatic rollback on failure
+- **Sticky sessions & LB strategies** -- cookie-based affinity, round-robin or least-connections
+- **Health checking** -- Docker HEALTHCHECK or HTTP polling (works with FROM scratch images)
 - **Scaling** -- scale services up and down across hosts
+- **Interactive service picker** -- multi-select which services to deploy
 - **Generation-based rollback** -- instant rollback to previous versions
 - **Declarative config** -- define your infrastructure in a single TOML file
 - **Single binary** -- no runtime dependencies (just SSH and Docker on your hosts)
@@ -225,17 +227,17 @@ All commands accept `--env <name>` (load `korgi.<name>.toml` overlay), `--config
 ## Zero-Downtime Deploy Pipeline
 
 ```
-1. PREPARE      → query live state, compute placement
-2. PULL         → pull image on target hosts
-3. START GREEN  → create new containers with host port bindings
-4. HEALTH CHECK → wait for Docker HEALTHCHECK to pass
-   └─ failure   → stop & remove new containers, abort
-5. DRAIN OLD    → gracefully stop previous generation
-6. CLEANUP      → remove containers beyond rollback_keep
-7. SYNC CONFIG  → regenerate Traefik routing config
+1. PREPARE       → query live state, compute placement, find free ports
+2. PULL          → pull image on target hosts
+3. START GREEN   → create new containers with host port bindings
+4. HEALTH CHECK  → wait for containers to become healthy
+   └─ failure    → stop & remove new containers, abort
+5. SYNC CONFIG   → update Traefik to route traffic to new containers
+6. DRAIN OLD     → gracefully stop ALL old generation containers
+7. CLEANUP       → remove containers beyond rollback_keep
 ```
 
-The old generation is **never touched** until the new one is confirmed healthy. If health checks fail, the new containers are removed and the old ones keep serving traffic.
+The old generation is **never stopped** until Traefik has been updated to route traffic to the new containers (step 5). If health checks fail, the new containers are removed and the old ones keep serving traffic.
 
 ## Cross-Host Load Balancing
 
