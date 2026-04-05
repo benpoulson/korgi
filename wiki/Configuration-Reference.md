@@ -153,6 +153,41 @@ Traefik routing rules. Services without routing are background workers (no Traef
 | `rule` | string | yes | | Traefik routing rule (e.g. `` Host(`api.example.com`) ``). |
 | `entrypoints` | list of strings | no | `[]` | Which Traefik entrypoints to listen on. |
 | `tls` | boolean | no | `false` | Enable TLS with Let's Encrypt cert resolver. |
+| `lb_strategy` | string | no | `"roundrobin"` | Load balancing algorithm. See [Load Balancing](#load-balancing). |
+
+### `[services.routing.sticky]`
+
+Enables cookie-based sticky sessions. Presence of this section turns on session affinity.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `cookie_name` | string | no | `korgi_{service}` | Name of the sticky session cookie. |
+| `secure` | boolean | no | `true` | Set the Secure flag on the cookie. |
+| `http_only` | boolean | no | `true` | Set the HttpOnly flag on the cookie. |
+
+```toml
+[services.routing.sticky]
+cookie_name = "my_session"
+secure = true
+http_only = true
+```
+
+### Load Balancing
+
+Available strategies for `lb_strategy`:
+
+| Value | Description |
+|-------|-------------|
+| `roundrobin` | Weighted Round Robin (default). Even distribution across backends. |
+| `leastconnections` | Routes to the server with fewest active connections. |
+
+```toml
+[services.routing]
+rule = "Host(`api.example.com`)"
+entrypoints = ["websecure"]
+tls = true
+lb_strategy = "leastconnections"
+```
 
 ### `[services.ports]`
 

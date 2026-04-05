@@ -40,6 +40,39 @@ http:
           timeout: 3s
 ```
 
+## Load Balancing Strategy
+
+By default, Traefik uses weighted round-robin. You can change this per service:
+
+```toml
+[services.routing]
+rule = "Host(`api.example.com`)"
+lb_strategy = "leastconnections"   # routes to server with fewest active connections
+```
+
+| Strategy | Description |
+|----------|-------------|
+| `roundrobin` | Default. Even distribution across all backends. |
+| `leastconnections` | Routes to the backend with fewest active connections. Better for uneven workloads. |
+
+## Sticky Sessions
+
+For stateful services (WebSockets, file uploads, etc.), enable cookie-based session affinity:
+
+```toml
+[services.routing]
+rule = "Host(`socket.example.com`)"
+entrypoints = ["websecure"]
+tls = true
+
+[services.routing.sticky]
+cookie_name = "my_session"     # default: korgi_{service}
+secure = true                  # default: true
+http_only = true               # default: true
+```
+
+When sticky sessions are enabled, Traefik sets a cookie that pins a client to the same backend server for subsequent requests. This is configured in both the Docker labels and the file provider YAML automatically.
+
 ## Host addressing
 
 Each host has two addresses:
