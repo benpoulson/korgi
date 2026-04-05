@@ -22,22 +22,21 @@ pub async fn run(
             .find(|s| s.name == name)
             .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in config", name))?;
         vec![svc]
+    } else if config.services.len() > 1 && !dry_run {
+        // Interactive multi-select when multiple services and no explicit filter
+        let names: Vec<&str> = config.services.iter().map(|s| s.name.as_str()).collect();
+        let selected = output::multi_select("Select services to deploy:", &names, auto_yes);
+        if selected.is_empty() {
+            output::info("No services selected");
+            return Ok(());
+        }
+        selected.iter().map(|&i| &config.services[i]).collect()
     } else {
         config.services.iter().collect()
     };
 
     if dry_run {
         output::info("Dry run mode -- no changes will be made");
-    }
-
-    if !dry_run {
-        let svc_names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
-        let host_count = config.node_hosts().len();
-        let msg = format!("Deploy {} to {} hosts?", svc_names.join(", "), host_count,);
-        if !output::confirm(&msg, auto_yes) {
-            output::info("Cancelled");
-            return Ok(());
-        }
     }
 
     // Phase A: Deploy all services (start new containers, health check)
