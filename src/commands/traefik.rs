@@ -87,7 +87,10 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
         }
 
         let host_config = HostConfig {
-            binds: Some(vec!["korgi-letsencrypt:/letsencrypt".to_string()]),
+            binds: Some(vec![
+                "korgi-letsencrypt:/letsencrypt".to_string(),
+                "korgi-config:/etc/korgi".to_string(),
+            ]),
             port_bindings: Some(port_bindings),
             restart_policy: Some(RestartPolicy {
                 name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
