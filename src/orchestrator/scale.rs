@@ -90,6 +90,7 @@ pub async fn scale_service<D: DockerHostApi>(
                 traefik_network,
                 &resolved_env,
                 Some(host.internal_addr()),
+                None,
             );
 
             let id = docker.create_container(&name, container_config).await?;

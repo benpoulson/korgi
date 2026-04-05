@@ -77,6 +77,7 @@ fn extract_health_from_status(status: Option<&str>) -> Option<String> {
 }
 
 /// Build a Docker container config from a korgi service config.
+#[allow(clippy::too_many_arguments)]
 pub fn build_container_config(
     project: &str,
     svc: &ServiceConfig,
@@ -85,6 +86,7 @@ pub fn build_container_config(
     traefik_network: &str,
     resolved_env: &HashMap<String, String>,
     host_bind_ip: Option<&str>,
+    port_gen_offset: Option<u16>,
 ) -> ContainerCreateBody {
     let container_labels = labels::all_labels(project, svc, generation, instance, traefik_network);
 
@@ -148,10 +150,12 @@ pub fn build_container_config(
         .and_then(|r| r.cpus.as_ref())
         .map(|c| parse_nano_cpus(c));
 
-    // Build port bindings if host_base or host port is configured
+    // Build port bindings if host_base or host port is configured.
     let port_bindings = svc.ports.as_ref().and_then(|ports| {
         let host_port = if let Some(base) = ports.host_base {
-            Some(base + instance as u16)
+            let offset = port_gen_offset
+                .unwrap_or((generation.saturating_sub(1) as u16) * svc.replicas as u16);
+            Some(base + offset + instance as u16)
         } else {
             ports.host
         };
@@ -415,7 +419,7 @@ mod tests {
     fn test_build_container_config_minimal() {
         let svc = ServiceConfig::test_service("api", "myapp/api:v1");
         let env = HashMap::new();
-        let config = build_container_config("myapp", &svc, 1, 0, "korgi-traefik", &env, None);
+        let config = build_container_config("myapp", &svc, 1, 0, "korgi-traefik", &env, None, None);
 
         assert_eq!(config.image, Some("myapp/api:v1".to_string()));
         assert!(config.healthcheck.is_none()); // no health config
@@ -450,7 +454,7 @@ mod tests {
             start_period: Some("15s".to_string()),
         });
 
-        let config = build_container_config("proj", &svc, 2, 0, "net", &HashMap::new(), None);
+        let config = build_container_config("proj", &svc, 2, 0, "net", &HashMap::new(), None, None);
         let hc = config.healthcheck.unwrap();
         let test = hc.test.unwrap();
         assert_eq!(test[0], "CMD-SHELL");
@@ -471,7 +475,7 @@ mod tests {
         );
         env.insert("REDIS_URL".to_string(), "redis://localhost".to_string());
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &env, None);
+        let config = build_container_config("proj", &svc, 1, 0, "net", &env, None, None);
         let env_vars = config.env.unwrap();
         assert_eq!(env_vars.len(), 2);
         assert!(env_vars.contains(&"DATABASE_URL=postgres://localhost/db".to_string()));
@@ -494,7 +498,7 @@ mod tests {
             },
         ];
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
         let binds = config.host_config.unwrap().binds.unwrap();
         assert_eq!(binds.len(), 2);
         assert!(binds.contains(&"/data:/app/data".to_string()));
@@ -509,7 +513,7 @@ mod tests {
             cpus: Some("0.5".to_string()),
         });
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
         let hc = config.host_config.unwrap();
         assert_eq!(hc.memory, Some(268435456)); // 256 * 1024 * 1024
         assert_eq!(hc.nano_cpus, Some(500_000_000));
@@ -526,7 +530,8 @@ mod tests {
         ] {
             let mut svc = ServiceConfig::test_service("api", "api:v1");
             svc.restart = policy_str.to_string();
-            let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+            let config =
+                build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
             let restart = config.host_config.unwrap().restart_policy.unwrap();
             assert_eq!(
                 restart.name,
@@ -547,7 +552,7 @@ mod tests {
         ]);
         svc.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None);
+        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
         assert_eq!(config.cmd.unwrap(), vec!["serve", "--port", "8080"]);
         assert_eq!(config.entrypoint.unwrap(), vec!["/bin/sh", "-c"]);
     }
@@ -568,8 +573,16 @@ mod tests {
             host_base: None,
         });
 
-        let config =
-            build_container_config("myapp", &svc, 5, 0, "korgi-traefik", &HashMap::new(), None);
+        let config = build_container_config(
+            "myapp",
+            &svc,
+            5,
+            0,
+            "korgi-traefik",
+            &HashMap::new(),
+            None,
+            None,
+        );
         let labels = config.labels.unwrap();
         assert_eq!(labels.get("traefik.enable").unwrap(), "true");
         assert_eq!(

@@ -89,6 +89,38 @@ pub async fn deploy_service<D: DockerHostApi>(
     pb.finish_and_clear();
     output::success(&format!("Image pulled on {} hosts", unique_hosts.len()));
 
+    // Phase 2.5: FIND AVAILABLE PORT RANGE
+    let port_offset = if let Some(ports) = &svc.ports
+        && let Some(base) = ports.host_base
+    {
+        // Collect all used ports across target hosts
+        let mut used_ports = std::collections::HashSet::new();
+        for host_name in &unique_hosts {
+            let docker = docker_hosts.get(*host_name).unwrap();
+            let all_containers = docker
+                .list_containers(std::collections::HashMap::new(), false)
+                .await?;
+            for c in &all_containers {
+                if let Some(c_ports) = &c.ports {
+                    for p in c_ports {
+                        if let Some(port) = p.public_port {
+                            used_ports.insert(port);
+                        }
+                    }
+                }
+            }
+        }
+        let offset = find_free_port_offset(base, svc.replicas, generation, &used_ports)?;
+        debug!(
+            "Port range: {}..{}",
+            base + offset,
+            base + offset + svc.replicas as u16 - 1
+        );
+        Some(offset)
+    } else {
+        None
+    };
+
     // Phase 3: ENSURE NETWORK + START GREEN
     let pb = output::spinner("Starting new containers...");
 
@@ -121,6 +153,7 @@ pub async fn deploy_service<D: DockerHostApi>(
             traefik_network,
             &resolved_env,
             Some(host.internal_addr()),
+            port_offset,
         );
 
         let id = docker
@@ -154,7 +187,11 @@ pub async fn deploy_service<D: DockerHostApi>(
                     .as_ref()
                     .and_then(|p| {
                         p.host_base
-                            .map(|base| base + placements[idx].1 as u16)
+                            .map(|base| {
+                                let gen_offset =
+                                    (generation.saturating_sub(1) as u16) * svc.replicas as u16;
+                                base + gen_offset + placements[idx].1 as u16
+                            })
                             .or(p.host)
                     })
                     .unwrap_or(svc.ports.as_ref().map(|p| p.container).unwrap_or(80));
@@ -253,12 +290,39 @@ pub async fn deploy_service<D: DockerHostApi>(
     Ok(())
 }
 
+/// Find the first port offset where all replicas fit without colliding with used ports.
+/// Starts from the generation-based default offset, advances by replica count until free.
+pub fn find_free_port_offset(
+    base: u16,
+    replicas: u32,
+    generation: u64,
+    used_ports: &std::collections::HashSet<u16>,
+) -> Result<u16> {
+    let replicas = replicas as u16;
+    let mut offset = (generation.saturating_sub(1) as u16) * replicas;
+    loop {
+        let all_free = (0..replicas).all(|i| !used_ports.contains(&(base + offset + i)));
+        if all_free {
+            return Ok(offset);
+        }
+        offset += replicas;
+        if offset > 10000 {
+            anyhow::bail!(
+                "Could not find {} free ports starting from {}",
+                replicas,
+                base
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::types::*;
     use crate::docker::mock::tests::*;
     use bollard::models::ContainerSummaryStateEnum;
+    use std::collections::HashSet;
 
     fn test_config() -> Config {
         Config {
@@ -640,5 +704,103 @@ mod tests {
                 .any(|c| matches!(c, DockerCall::StartContainer { .. })),
             "No containers should be started when pull fails"
         );
+    }
+
+    // --- Port allocation ---
+
+    #[test]
+    fn test_port_offset_gen1_no_conflicts() {
+        // Gen 1, 2 replicas, base 9001, no ports used
+        let used = HashSet::new();
+        let offset = find_free_port_offset(9001, 2, 1, &used).unwrap();
+        assert_eq!(offset, 0); // gen 1 offset = (1-1)*2 = 0
+        // Ports: 9001, 9002
+    }
+
+    #[test]
+    fn test_port_offset_gen2_no_conflicts() {
+        // Gen 2, 2 replicas, base 9001, gen1 ports still used
+        let used: HashSet<u16> = [9001, 9002].into();
+        let offset = find_free_port_offset(9001, 2, 2, &used).unwrap();
+        assert_eq!(offset, 2); // gen 2 offset = (2-1)*2 = 2
+        // Ports: 9003, 9004
+    }
+
+    #[test]
+    fn test_port_offset_gen2_gen1_freed() {
+        // Gen 2, but gen1 ports already freed (old containers stopped)
+        let used = HashSet::new();
+        let offset = find_free_port_offset(9001, 2, 2, &used).unwrap();
+        assert_eq!(offset, 2); // still uses gen-based default offset
+        // Ports: 9003, 9004
+    }
+
+    #[test]
+    fn test_port_offset_skips_occupied_range() {
+        // Gen 2, base 9001, 2 replicas. Default would be 9003,9004 but 9003 is taken
+        let used: HashSet<u16> = [9001, 9002, 9003].into();
+        let offset = find_free_port_offset(9001, 2, 2, &used).unwrap();
+        assert_eq!(offset, 4); // skips to 9005, 9006
+    }
+
+    #[test]
+    fn test_port_offset_skips_multiple_occupied_ranges() {
+        // Several ranges occupied
+        let used: HashSet<u16> = [9001, 9002, 9003, 9004, 9005, 9006].into();
+        let offset = find_free_port_offset(9001, 2, 1, &used).unwrap();
+        assert_eq!(offset, 6); // 9007, 9008
+    }
+
+    #[test]
+    fn test_port_offset_three_replicas() {
+        // 3 replicas, gen 3
+        let used: HashSet<u16> = [9001, 9002, 9003, 9004, 9005, 9006].into();
+        let offset = find_free_port_offset(9001, 3, 3, &used).unwrap();
+        assert_eq!(offset, 6); // gen 3 default = (3-1)*3 = 6 -> 9007,9008,9009
+    }
+
+    #[test]
+    fn test_port_offset_gen3_after_gen1_freed_gen2_running() {
+        // Simulates: gen1 drained (freed), gen2 running, deploying gen3
+        // Gen2 occupies 9003, 9004 (offset 2, 2 replicas)
+        let used: HashSet<u16> = [9003, 9004].into();
+        let offset = find_free_port_offset(9001, 2, 3, &used).unwrap();
+        assert_eq!(offset, 4); // gen 3 default = (3-1)*2 = 4 -> 9005, 9006 (free)
+    }
+
+    #[test]
+    fn test_port_offset_external_service_occupying_port() {
+        // Some non-korgi service using port 9005
+        let used: HashSet<u16> = [9001, 9002, 9005].into();
+        let offset = find_free_port_offset(9001, 2, 2, &used).unwrap();
+        assert_eq!(offset, 2); // gen 2 default = 2 -> 9003, 9004 (free, 9005 not in range)
+    }
+
+    #[test]
+    fn test_port_offset_external_blocks_default_range() {
+        // External service blocks the gen2 default range
+        let used: HashSet<u16> = [9001, 9002, 9003].into();
+        let offset = find_free_port_offset(9001, 2, 2, &used).unwrap();
+        // Default offset 2 -> 9003,9004. 9003 taken, skip to offset 4 -> 9005,9006
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_port_offset_reuses_freed_ports() {
+        // After many deploys, old gen ports are freed.
+        // Gen 5, base 9001, 2 replicas. Only gen 4 (9007,9008) still running.
+        let used: HashSet<u16> = [9007, 9008].into();
+        let offset = find_free_port_offset(9001, 2, 5, &used).unwrap();
+        // Default offset = (5-1)*2 = 8 -> 9009, 9010 (free)
+        assert_eq!(offset, 8);
+    }
+
+    #[test]
+    fn test_port_offset_wraps_around_to_freed_range() {
+        // Gen 10, base 9001, 2 replicas. Only gen 9 running.
+        // Default offset = 18 -> 9019, 9020
+        let used: HashSet<u16> = [9017, 9018].into();
+        let offset = find_free_port_offset(9001, 2, 10, &used).unwrap();
+        assert_eq!(offset, 18); // 9019, 9020 are free
     }
 }
