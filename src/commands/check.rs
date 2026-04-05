@@ -27,11 +27,11 @@ pub async fn run(config: &Config) -> Result<()> {
     ));
 
     output::header("SSH Connectivity");
-    let pool = SshPool::connect_all(config).await;
+    let pool = SshPool::connect_all(config);
     match pool {
         Ok(pool) => {
             for (name, session) in pool.iter() {
-                match session.ping().await {
+                match session.ping() {
                     Ok(()) => output::success(&format!("{}: connected", name)),
                     Err(e) => output::error(&format!("{}: ping failed -- {}", name, e)),
                 }
@@ -47,7 +47,7 @@ pub async fn run(config: &Config) -> Result<()> {
                 }
             }
 
-            pool.close().await;
+            drop(pool);
         }
         Err(e) => {
             output::error(&format!("SSH connection failed: {}", e));

@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use async_trait::async_trait;
-use russh::client;
-use ssh_key::PublicKey;
-use std::sync::Arc;
+use std::io::Read;
+use std::net::TcpStream;
+use std::path::Path;
 use tracing::{debug, instrument};
 
 use crate::config::types::HostConfig;
@@ -21,31 +20,16 @@ impl ExecOutput {
     }
 }
 
-/// Wrapper around a russh SSH connection to a single host.
+/// Wrapper around an ssh2 SSH session to a single host.
 pub struct SshSession {
-    handle: client::Handle<SshHandler>,
+    session: ssh2::Session,
     pub host: HostConfig,
-}
-
-struct SshHandler;
-
-#[async_trait]
-impl client::Handler for SshHandler {
-    type Error = anyhow::Error;
-
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
-        // TODO: implement known_hosts checking for production use
-        Ok(true)
-    }
 }
 
 impl SshSession {
     /// Connect to a host via SSH.
     #[instrument(skip_all, fields(host = %host.name, address = %host.address))]
-    pub async fn connect(host: &HostConfig) -> Result<Self> {
+    pub fn connect(host: &HostConfig) -> Result<Self> {
         debug!(
             "Connecting to {} ({}@{}:{})",
             host.name,
@@ -54,16 +38,17 @@ impl SshSession {
             host.port
         );
 
-        let config = Arc::new(client::Config::default());
-        let handler = SshHandler;
-
         let addr = format!("{}:{}", host.ssh_address(), host.port);
+        let tcp = TcpStream::connect(&addr)
+            .with_context(|| format!("TCP connection failed to {}", addr))?;
 
-        let mut handle = client::connect(config, &addr, handler)
-            .await
-            .with_context(|| format!("Failed to connect to {}", host.name))?;
+        let mut session = ssh2::Session::new().with_context(|| "Failed to create SSH session")?;
+        session.set_tcp_stream(tcp);
+        session
+            .handshake()
+            .with_context(|| format!("SSH handshake failed with {}", host.name))?;
 
-        // Resolve key paths to try: explicit config, then defaults
+        // Resolve key paths: explicit config, then defaults
         let key_paths: Vec<String> = if let Some(key_path) = &host.ssh_key {
             vec![expand_tilde(key_path)]
         } else {
@@ -72,112 +57,111 @@ impl SshSession {
 
         let mut authenticated = false;
 
+        // Try key files
         for key_path in &key_paths {
-            if !std::path::Path::new(key_path).exists() {
+            if !Path::new(key_path).exists() {
                 continue;
             }
 
-            // Try without passphrase first
-            let key = match russh_keys::load_secret_key(key_path, None) {
-                Ok(key) => key,
-                Err(_) => {
-                    // Key is encrypted -- prompt for passphrase
-                    let passphrase = prompt_passphrase(key_path)?;
-                    russh_keys::load_secret_key(key_path, Some(&passphrase))
-                        .with_context(|| format!("Failed to decrypt key: {}", key_path))?
-                }
-            };
+            debug!("Trying key: {}", key_path);
 
-            match handle
-                .authenticate_publickey(&host.user, Arc::new(key))
-                .await
-            {
-                Ok(true) => {
+            // Try without passphrase first
+            match session.userauth_pubkey_file(&host.user, None, Path::new(key_path), None) {
+                Ok(()) => {
                     debug!("Authenticated with key {}", key_path);
                     authenticated = true;
                     break;
                 }
-                Ok(false) => {
-                    debug!("Key {} rejected by server", key_path);
-                }
-                Err(e) => {
-                    debug!("Auth error with key {}: {}", key_path, e);
+                Err(_) => {
+                    // May need a passphrase
+                    let passphrase = prompt_passphrase(key_path)?;
+                    match session.userauth_pubkey_file(
+                        &host.user,
+                        None,
+                        Path::new(key_path),
+                        Some(&passphrase),
+                    ) {
+                        Ok(()) => {
+                            debug!("Authenticated with key {} (passphrase)", key_path);
+                            authenticated = true;
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("Key {} failed: {}", key_path, e);
+                        }
+                    }
                 }
             }
         }
 
+        // Try ssh-agent
+        if !authenticated && session.userauth_agent(&host.user).is_ok() {
+            debug!("Authenticated via ssh-agent");
+            authenticated = true;
+        }
+
+        // Fall back to password
         if !authenticated {
-            let tried = if key_paths.is_empty() {
-                "no keys found".to_string()
-            } else {
-                key_paths.join(", ")
-            };
-            anyhow::bail!(
-                "SSH authentication failed for {}@{} (tried: {})",
-                host.user,
-                host.name,
-                tried
-            );
+            let password = prompt_password(&host.user, host.ssh_address())?;
+            session
+                .userauth_password(&host.user, &password)
+                .with_context(|| format!("Password auth failed for {}", host.name))?;
+            authenticated = session.authenticated();
+        }
+
+        if !authenticated {
+            anyhow::bail!("SSH authentication failed for {}@{}", host.user, host.name);
         }
 
         debug!("Connected to {}", host.name);
-
         Ok(Self {
-            handle,
+            session,
             host: host.clone(),
         })
     }
 
     /// Execute a command on the remote host.
-    #[instrument(skip(self), fields(host = %self.host.name))]
-    pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
-        debug!("Executing: {}", command);
-
+    pub fn exec(&self, command: &str) -> Result<ExecOutput> {
         let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .context("Failed to open SSH channel")?;
+            .session
+            .channel_session()
+            .with_context(|| format!("Failed to open channel on {}", self.host.name))?;
 
         channel
-            .exec(true, command)
-            .await
-            .context("Failed to exec command")?;
+            .exec(command)
+            .with_context(|| format!("Failed to exec on {}", self.host.name))?;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_code = None;
+        let mut stdout = String::new();
+        channel.read_to_string(&mut stdout).ok();
 
-        loop {
-            let Some(msg) = channel.wait().await else {
-                break;
-            };
-            match msg {
-                russh::ChannelMsg::Data { data } => {
-                    stdout.extend_from_slice(&data);
-                }
-                russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
-                    stderr.extend_from_slice(&data);
-                }
-                russh::ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = Some(exit_status);
-                }
-                _ => {}
-            }
-        }
+        let mut stderr = String::new();
+        channel.stderr().read_to_string(&mut stderr).ok();
 
-        channel.eof().await.ok();
+        channel.wait_close().ok();
+        let exit_code = channel.exit_status().ok().map(|c| c as u32);
 
         Ok(ExecOutput {
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            stdout,
+            stderr,
             exit_code,
         })
     }
 
+    /// Open a direct-streamlocal channel to a Unix socket on the remote host.
+    pub fn channel_direct_streamlocal(&self, socket_path: &str) -> Result<ssh2::Channel> {
+        self.session
+            .channel_direct_streamlocal(socket_path, None)
+            .with_context(|| {
+                format!(
+                    "Failed to open channel to {} on {}",
+                    socket_path, self.host.name
+                )
+            })
+    }
+
     /// Check if the connection is still alive.
-    pub async fn ping(&self) -> Result<()> {
-        let output = self.exec("echo ok").await?;
+    pub fn ping(&self) -> Result<()> {
+        let output = self.exec("echo ok")?;
         if output.success() {
             Ok(())
         } else {
@@ -185,32 +169,9 @@ impl SshSession {
         }
     }
 
-    /// Open a direct-streamlocal channel to a Unix socket on the remote host.
-    /// Used to tunnel to the Docker daemon socket.
-    pub async fn open_direct_streamlocal(
-        &self,
-        remote_socket: &str,
-    ) -> Result<russh::Channel<russh::client::Msg>> {
-        let channel = self
-            .handle
-            .channel_open_direct_streamlocal(remote_socket)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to open channel to {} on {}",
-                    remote_socket, self.host.name
-                )
-            })?;
-        Ok(channel)
-    }
-
-    /// Close the SSH connection.
-    pub async fn close(self) -> Result<()> {
-        self.handle
-            .disconnect(russh::Disconnect::ByApplication, "closing", "")
-            .await
-            .ok();
-        Ok(())
+    /// Get the underlying ssh2 session reference.
+    pub fn session(&self) -> &ssh2::Session {
+        &self.session
     }
 }
 
@@ -237,9 +198,16 @@ fn default_key_paths() -> Vec<String> {
     ]
 }
 
-/// Prompt the user for an SSH key passphrase on stderr.
+/// Prompt the user for an SSH key passphrase.
 fn prompt_passphrase(key_path: &str) -> Result<String> {
     eprint!("Enter passphrase for {}: ", key_path);
     let passphrase = rpassword::read_password().with_context(|| "Failed to read passphrase")?;
     Ok(passphrase)
+}
+
+/// Prompt the user for an SSH password.
+fn prompt_password(user: &str, host: &str) -> Result<String> {
+    eprint!("{}@{}'s password: ", user, host);
+    let password = rpassword::read_password().with_context(|| "Failed to read password")?;
+    Ok(password)
 }

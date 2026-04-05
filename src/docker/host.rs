@@ -22,10 +22,9 @@ pub struct DockerHost {
 impl DockerHost {
     /// Connect to Docker on a remote host via SSH.
     ///
-    /// Uses russh to establish an SSH session, then starts a local Unix socket
+    /// Uses ssh2 to establish an SSH session, then starts a local Unix socket
     /// proxy that bridges connections to the remote Docker socket via
-    /// `direct-streamlocal`. bollard connects to the local socket.
-    /// Pure Rust -- no system SSH binary needed, handles passphrases via ssh-agent.
+    /// `channel_direct_streamlocal`. bollard connects to the local socket.
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
         let docker_socket = host
@@ -41,12 +40,9 @@ impl DockerHost {
             docker_socket
         );
 
-        // Establish SSH session via russh
+        // Establish SSH session (blocking -- ssh2 is sync)
         let ssh = crate::ssh::session::SshSession::connect(host)
-            .await
             .with_context(|| format!("SSH connection failed to {}", host.name))?;
-
-        let ssh_handle = std::sync::Arc::new(ssh);
 
         // Create a local Unix socket for bollard to connect to
         let socket_dir = std::env::temp_dir().join("korgi");
@@ -58,29 +54,31 @@ impl DockerHost {
             std::fs::remove_file(&socket_path).ok();
         }
 
-        let listener = tokio::net::UnixListener::bind(&socket_path)
-            .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
-
-        // Spawn proxy: accepts local connections, bridges each to a remote
-        // Docker socket channel via SSH direct-streamlocal
         let remote_socket = docker_socket.to_string();
-        let proxy_ssh = ssh_handle.clone();
+        let session = ssh.session().clone();
         let host_dbg = host.name.clone();
 
-        tokio::spawn(async move {
-            loop {
-                let (local_stream, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                let ssh = proxy_ssh.clone();
-                let remote = remote_socket.clone();
-                let h = host_dbg.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = proxy_to_remote_socket(local_stream, &ssh, &remote).await {
-                        tracing::debug!("Docker proxy error on {}: {}", h, e);
+        let std_listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
+
+        std::thread::spawn(move || {
+            for stream in std_listener.incoming() {
+                let Ok(local_stream) = stream else { break };
+                match session.channel_direct_streamlocal(&remote_socket, None) {
+                    Ok(channel) => {
+                        if let Err(e) = proxy_channel(channel, &local_stream) {
+                            tracing::debug!("Proxy error on {}: {}", host_dbg, e);
+                        }
                     }
-                });
+                    Err(e) => {
+                        tracing::error!(
+                            "channel_direct_streamlocal failed on {}: {} (code: {:?})",
+                            host_dbg,
+                            e,
+                            e.code()
+                        );
+                    }
+                }
             }
         });
 
@@ -382,28 +380,42 @@ fn parse_image_ref(image: &str) -> (&str, &str) {
     (image, "latest")
 }
 
-/// Bridge a local Unix stream to the remote Docker socket via an SSH channel.
-async fn proxy_to_remote_socket(
-    local: tokio::net::UnixStream,
-    ssh: &std::sync::Arc<crate::ssh::session::SshSession>,
-    remote_socket: &str,
-) -> Result<()> {
-    let channel = ssh.open_direct_streamlocal(remote_socket).await?;
-    let (local_read, local_write) = local.into_split();
-    let stream = channel.into_stream();
-    let (ch_read, ch_write) = tokio::io::split(stream);
+/// Bidirectional copy between a local Unix stream and an ssh2 channel.
+fn proxy_channel(mut channel: ssh2::Channel, local: &std::os::unix::net::UnixStream) -> Result<()> {
+    use std::io::{Read, Write};
 
-    let mut local_read = local_read;
-    let mut local_write = local_write;
-    let mut ch_read = ch_read;
-    let mut ch_write = ch_write;
+    local.set_read_timeout(Some(std::time::Duration::from_millis(50)))?;
 
-    let client_to_server = tokio::io::copy(&mut local_read, &mut ch_write);
-    let server_to_client = tokio::io::copy(&mut ch_read, &mut local_write);
+    let mut local_r = local.try_clone()?;
+    let mut local_w = local.try_clone()?;
+    let mut buf = vec![0u8; 65536];
 
-    tokio::select! {
-        r = client_to_server => { r.ok(); },
-        r = server_to_client => { r.ok(); },
+    loop {
+        // local -> channel
+        match local_r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                channel.write_all(&buf[..n]).ok();
+                channel.flush().ok();
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+
+        // channel -> local
+        match channel.read(&mut buf) {
+            Ok(0) if channel.eof() => break,
+            Ok(n) if n > 0 => {
+                local_w.write_all(&buf[..n]).ok();
+            }
+            Ok(_) => {}
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
     }
 
     Ok(())

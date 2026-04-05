@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 use super::session::SshSession;
-use crate::config::types::{Config, HostConfig};
+use crate::config::types::Config;
 
 /// Pool of SSH connections, one per configured host.
 pub struct SshPool {
@@ -11,52 +11,18 @@ pub struct SshPool {
 }
 
 impl SshPool {
-    /// Connect to all configured hosts in parallel.
-    pub async fn connect_all(config: &Config) -> Result<Self> {
+    /// Connect to all configured hosts.
+    pub fn connect_all(config: &Config) -> Result<Self> {
         info!("Connecting to {} hosts...", config.hosts.len());
 
-        let mut handles = Vec::new();
-        for host in &config.hosts {
-            let host = host.clone();
-            handles.push(tokio::spawn(async move {
-                let session = SshSession::connect(&host).await?;
-                Ok::<_, anyhow::Error>((host.name.clone(), session))
-            }));
-        }
-
         let mut sessions = HashMap::new();
-        for handle in handles {
-            let (name, session) = handle
-                .await
-                .context("SSH connection task panicked")?
-                .context("SSH connection failed")?;
-            sessions.insert(name, session);
+        for host in &config.hosts {
+            let session = SshSession::connect(host)
+                .with_context(|| format!("Failed to connect to {}", host.name))?;
+            sessions.insert(host.name.clone(), session);
         }
 
         debug!("Connected to all {} hosts", sessions.len());
-        Ok(Self { sessions })
-    }
-
-    /// Connect to a specific set of hosts by name.
-    pub async fn connect_hosts(hosts: &[&HostConfig]) -> Result<Self> {
-        let mut handles = Vec::new();
-        for host in hosts {
-            let host = (*host).clone();
-            handles.push(tokio::spawn(async move {
-                let session = SshSession::connect(&host).await?;
-                Ok::<_, anyhow::Error>((host.name.clone(), session))
-            }));
-        }
-
-        let mut sessions = HashMap::new();
-        for handle in handles {
-            let (name, session) = handle
-                .await
-                .context("SSH connection task panicked")?
-                .context("SSH connection failed")?;
-            sessions.insert(name, session);
-        }
-
         Ok(Self { sessions })
     }
 
@@ -77,12 +43,5 @@ impl SshPool {
 
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
-    }
-
-    /// Close all connections.
-    pub async fn close(self) {
-        for (_, session) in self.sessions {
-            session.close().await.ok();
-        }
     }
 }
