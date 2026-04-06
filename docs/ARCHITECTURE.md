@@ -171,8 +171,14 @@ Traefik and application containers must share a Docker network. Korgi creates an
   HEALTH CHECK ─ fail → cleanup green containers, abort
      │                   (old generation untouched, still serving)
      ▼
+  SYNC TRAEFIK ─────→ routes traffic to both old + new (zero-downtime overlap)
+     │
+     ▼
   DRAIN OLD ──── fail → old containers may be partially stopped
      │                   (green is serving, recoverable)
+     ▼
+  SYNC TRAEFIK ─────→ removes drained containers from config
+     │
      ▼
   CLEANUP ───── fail ──→ old containers not cleaned up (harmless)
      │

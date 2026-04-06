@@ -232,12 +232,13 @@ All commands accept `--env <name>` (load `korgi.<name>.toml` overlay), `--config
 3. START GREEN   → create new containers with host port bindings
 4. HEALTH CHECK  → wait for containers to become healthy
    └─ failure    → stop & remove new containers, abort
-5. SYNC CONFIG   → update Traefik to route traffic to new containers
+5. SYNC CONFIG   → update Traefik to route to both old + new (zero-downtime overlap)
 6. DRAIN OLD     → gracefully stop ALL old generation containers
-7. CLEANUP       → remove containers beyond rollback_keep
+7. SYNC CONFIG   → update Traefik to remove drained containers
+8. CLEANUP       → remove containers beyond rollback_keep
 ```
 
-The old generation is **never stopped** until Traefik has been updated to route traffic to the new containers (step 5). If health checks fail, the new containers are removed and the old ones keep serving traffic.
+The old generation is **never stopped** until Traefik has been updated to route traffic to the new containers (step 5). After draining, Traefik is synced again (step 7) to remove stale URLs. If health checks fail, the new containers are removed and the old ones keep serving traffic.
 
 ## Cross-Host Load Balancing
 
