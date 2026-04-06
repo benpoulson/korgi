@@ -57,6 +57,9 @@ pub async fn run(
         for (svc, generation) in &deployed {
             drain_old_containers(config, svc, *generation, docker_hosts).await?;
         }
+
+        // Phase D: Re-sync Traefik to remove drained containers from config
+        sync_config::sync_traefik_config(config, docker_hosts).await?;
     }
 
     if services.len() > 1 {
