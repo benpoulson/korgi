@@ -35,10 +35,10 @@ If no `ssh_key` is set, korgi tries these in order:
 If a key is encrypted, korgi prompts for the passphrase:
 
 ```
-Enter passphrase for /Users/you/.ssh/id_rsa:
+Enter passphrase for /Users/you/.ssh/id_rsa (attempt 1/3):
 ```
 
-Input is hidden (no characters shown).
+Input is hidden (no characters shown). If the passphrase is wrong, korgi prompts again up to 3 times before moving on to other authentication methods.
 
 ## ssh-agent
 

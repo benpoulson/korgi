@@ -6,6 +6,8 @@ use tracing::{debug, instrument};
 
 use crate::config::types::HostConfig;
 
+const MAX_PASSPHRASE_ATTEMPTS: usize = 3;
+
 /// Output from an SSH command execution.
 #[derive(Debug)]
 pub struct ExecOutput {
@@ -73,22 +75,39 @@ impl SshSession {
                     break;
                 }
                 Err(_) => {
-                    // May need a passphrase
-                    let passphrase = prompt_passphrase(key_path)?;
-                    match session.userauth_pubkey_file(
-                        &host.user,
-                        None,
-                        Path::new(key_path),
-                        Some(&passphrase),
-                    ) {
-                        Ok(()) => {
-                            debug!("Authenticated with key {} (passphrase)", key_path);
-                            authenticated = true;
-                            break;
+                    // The key may be encrypted. Allow a few retries before falling back
+                    // to other auth methods so a passphrase typo does not immediately
+                    // push the user into password authentication.
+                    let mut key_authenticated = false;
+                    for attempt in 1..=MAX_PASSPHRASE_ATTEMPTS {
+                        let passphrase =
+                            prompt_passphrase(key_path, attempt, MAX_PASSPHRASE_ATTEMPTS)?;
+                        match session.userauth_pubkey_file(
+                            &host.user,
+                            None,
+                            Path::new(key_path),
+                            Some(&passphrase),
+                        ) {
+                            Ok(()) => {
+                                debug!("Authenticated with key {} (passphrase)", key_path);
+                                authenticated = true;
+                                key_authenticated = true;
+                                break;
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "Key {} failed on passphrase attempt {}: {}",
+                                    key_path, attempt, e
+                                );
+                                if attempt < MAX_PASSPHRASE_ATTEMPTS {
+                                    eprintln!("Passphrase rejected. Try again.");
+                                }
+                            }
                         }
-                        Err(e) => {
-                            debug!("Key {} failed: {}", key_path, e);
-                        }
+                    }
+
+                    if key_authenticated {
+                        break;
                     }
                 }
             }
@@ -199,8 +218,15 @@ fn default_key_paths() -> Vec<String> {
 }
 
 /// Prompt the user for an SSH key passphrase.
-fn prompt_passphrase(key_path: &str) -> Result<String> {
-    eprint!("Enter passphrase for {}: ", key_path);
+fn prompt_passphrase(key_path: &str, attempt: usize, max_attempts: usize) -> Result<String> {
+    if max_attempts > 1 {
+        eprint!(
+            "Enter passphrase for {} (attempt {}/{}): ",
+            key_path, attempt, max_attempts
+        );
+    } else {
+        eprint!("Enter passphrase for {}: ", key_path);
+    }
     let passphrase = rpassword::read_password().with_context(|| "Failed to read passphrase")?;
     Ok(passphrase)
 }
