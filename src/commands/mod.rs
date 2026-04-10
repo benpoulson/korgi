@@ -1,6 +1,7 @@
 pub mod check;
 pub mod deploy;
 pub mod destroy;
+pub mod diff;
 pub mod exec;
 pub mod init;
 pub mod logs;

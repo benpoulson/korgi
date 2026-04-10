@@ -30,6 +30,17 @@ korgi check
 korgi check --json
 ```
 
+### `korgi diff`
+
+Show what a deploy would change without applying it.
+
+```sh
+korgi diff
+korgi diff --service api
+korgi diff --service api --image myapp/api:v2
+korgi diff --json
+```
+
 ### `korgi status`
 
 Show running containers across all hosts.

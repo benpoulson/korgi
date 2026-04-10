@@ -41,6 +41,18 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
             korgi::commands::check::run(&cfg, cli.json).await?;
         }
 
+        Commands::Diff { service, image } => {
+            let docker_hosts = connect_docker_hosts(&cfg).await?;
+            korgi::commands::diff::run(
+                &cfg,
+                service.as_deref(),
+                image.as_deref(),
+                &docker_hosts,
+                cli.json,
+            )
+            .await?;
+        }
+
         Commands::Status { service } => {
             let docker_hosts = connect_docker_hosts(&cfg).await?;
             korgi::commands::status::run(&cfg, service.as_deref(), &docker_hosts, cli.json).await?;

@@ -38,6 +38,17 @@ pub enum Commands {
     /// Validate configuration and test SSH connectivity
     Check,
 
+    /// Show what a deploy would change without applying it
+    Diff {
+        /// Filter by service name
+        #[arg(long)]
+        service: Option<String>,
+
+        /// Override the image for comparison
+        #[arg(long, requires = "service")]
+        image: Option<String>,
+    },
+
     /// Show running containers across hosts
     Status {
         /// Filter by service name
@@ -156,6 +167,36 @@ mod tests {
             Commands::Status { service } => assert!(service.is_none()),
             _ => panic!("expected Status"),
         }
+    }
+
+    #[test]
+    fn test_diff_no_filter() {
+        let cli = parse(&["korgi", "diff"]);
+        match &cli.command {
+            Commands::Diff { service, image } => {
+                assert!(service.is_none());
+                assert!(image.is_none());
+            }
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn test_diff_with_service_and_image() {
+        let cli = parse(&["korgi", "diff", "--service", "api", "--image", "myapp:v2"]);
+        match &cli.command {
+            Commands::Diff { service, image } => {
+                assert_eq!(service.as_deref(), Some("api"));
+                assert_eq!(image.as_deref(), Some("myapp:v2"));
+            }
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn test_diff_image_requires_service() {
+        let cli = Cli::try_parse_from(["korgi", "diff", "--image", "myapp:v2"]);
+        assert!(cli.is_err());
     }
 
     #[test]

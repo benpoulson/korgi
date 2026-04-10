@@ -160,6 +160,17 @@ korgi check
 
 Runs doctor-style diagnostics for config, SSH readiness, host key verification, and Docker access on all configured hosts.
 
+### Diff
+
+```sh
+korgi diff
+korgi diff --service api
+korgi diff --service api --image myapp/api:v2
+korgi diff --json
+```
+
+Shows what a deploy would change without applying it. The diff compares desired config to the currently running generation and reports planned placements plus config deltas.
+
 ### Deploy
 
 ```sh
@@ -211,6 +222,7 @@ Restarts the previous generation's containers and stops the current ones.
 |---------|-------------|
 | `korgi init` | Scaffold a `korgi.toml` config file |
 | `korgi check` | Run doctor-style diagnostics for config, SSH, host keys, and Docker |
+| `korgi diff` | Show deploy-time changes without applying them |
 | `korgi status` | Show running containers across all hosts |
 | `korgi deploy` | Zero-downtime deployment |
 | `korgi rollback` | Roll back to the previous generation |

@@ -42,6 +42,8 @@ pub mod tests {
         pub create_error: Arc<Mutex<Option<String>>>,
         /// If set, start_container will fail with this error
         pub start_error: Arc<Mutex<Option<String>>>,
+        /// Inspect responses keyed by container id
+        pub inspect_responses: Arc<Mutex<HashMap<String, ContainerInspectResponse>>>,
     }
 
     impl MockDockerHost {
@@ -57,6 +59,7 @@ pub mod tests {
                 pull_error: Arc::new(Mutex::new(None)),
                 create_error: Arc::new(Mutex::new(None)),
                 start_error: Arc::new(Mutex::new(None)),
+                inspect_responses: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -86,6 +89,13 @@ pub mod tests {
 
         pub fn set_create_error(&self, err: &str) {
             *self.create_error.lock().unwrap() = Some(err.to_string());
+        }
+
+        pub fn set_inspect_response(&self, id: &str, response: ContainerInspectResponse) {
+            self.inspect_responses
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), response);
         }
     }
 
@@ -210,6 +220,9 @@ pub mod tests {
                 .lock()
                 .unwrap()
                 .push(DockerCall::InspectContainer { id: id.to_string() });
+            if let Some(response) = self.inspect_responses.lock().unwrap().get(id).cloned() {
+                return Ok(response);
+            }
             let running = *self.container_running.lock().unwrap();
             let health_status = self.health_status.lock().unwrap().clone();
 
