@@ -12,6 +12,7 @@ use tracing::{debug, instrument};
 
 use super::traits::DockerHostApi;
 use crate::config::types::HostConfig;
+use crate::ssh::SshSession;
 
 /// Docker client connected to a remote host via SSH.
 pub struct DockerHost {
@@ -27,6 +28,13 @@ impl DockerHost {
     /// `channel_direct_streamlocal`. bollard connects to the local socket.
     #[instrument(skip_all, fields(host = %host.name))]
     pub async fn connect(host: &HostConfig) -> Result<Self> {
+        let ssh = crate::ssh::session::SshSession::connect(host)
+            .with_context(|| format!("SSH connection failed to {}", host.name))?;
+        Self::connect_with_session(host, &ssh).await
+    }
+
+    /// Connect to Docker on a remote host via an existing SSH session.
+    pub async fn connect_with_session(host: &HostConfig, ssh: &SshSession) -> Result<Self> {
         let docker_socket = host
             .docker_socket
             .as_deref()
@@ -39,10 +47,6 @@ impl DockerHost {
             host.port,
             docker_socket
         );
-
-        // Establish SSH session (blocking -- ssh2 is sync)
-        let ssh = crate::ssh::session::SshSession::connect(host)
-            .with_context(|| format!("SSH connection failed to {}", host.name))?;
 
         // Create a local Unix socket for bollard to connect to
         let socket_dir = std::env::temp_dir().join("korgi");

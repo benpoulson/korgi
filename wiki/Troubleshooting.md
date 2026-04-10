@@ -24,6 +24,23 @@ The host is unreachable or SSH isn't running.
 - Check firewall rules
 - If using a non-standard port, set `port = 2222` in the host config
 
+### "Host key is missing from ~/.ssh/known_hosts"
+
+Korgi could reach the host but refused to trust it automatically in a non-interactive context.
+
+**Fixes**:
+- Run `korgi check` interactively and accept the trust prompt
+- Or pre-seed the host with `ssh user@host` so OpenSSH writes the entry to `~/.ssh/known_hosts`
+
+### "Host key mismatch"
+
+The remote host key does not match the existing entry in `~/.ssh/known_hosts`.
+
+**Fixes**:
+- Confirm the host was rebuilt or rekeyed intentionally
+- Remove the stale entry from `~/.ssh/known_hosts`
+- Reconnect and verify the new fingerprint before trusting it
+
 ### Passphrase prompt appears twice
 
 If you have multiple hosts, korgi authenticates to each one separately. Each connection may prompt for the passphrase.

@@ -38,7 +38,7 @@ async fn run_with_config(cli: &Cli) -> Result<()> {
         Commands::Init => unreachable!(),
 
         Commands::Check => {
-            korgi::commands::check::run(&cfg).await?;
+            korgi::commands::check::run(&cfg, cli.json).await?;
         }
 
         Commands::Status { service } => {

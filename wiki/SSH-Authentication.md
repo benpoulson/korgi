@@ -6,9 +6,19 @@ Korgi uses pure Rust SSH (via the `ssh2` crate / libssh2) for all host connectio
 
 Korgi tries authentication methods in this order:
 
-1. **Key files** -- explicit `ssh_key` from config, or default paths
-2. **ssh-agent** -- if no key file works
-3. **Password** -- interactive prompt as last resort
+1. **Host key verification** -- verify the remote host against `~/.ssh/known_hosts`
+2. **Key files** -- explicit `ssh_key` from config, or default paths
+3. **ssh-agent** -- if no key file works
+4. **Password** -- interactive prompt as last resort
+
+## Host key verification
+
+Korgi verifies every SSH host against your standard OpenSSH `~/.ssh/known_hosts` file.
+
+- **Match** -- connection continues
+- **Missing host key** -- in an interactive terminal, Korgi prompts to trust the key and writes it to `known_hosts`
+- **Missing host key in non-interactive mode** -- connection fails and you must pre-populate `known_hosts`
+- **Mismatch** -- connection fails hard to avoid connecting to the wrong host
 
 ## Key files
 
@@ -55,6 +65,18 @@ If both key and agent auth fail, korgi prompts for a password:
 ```
 deploy@10.0.0.1's password:
 ```
+
+## `korgi check`
+
+`korgi check` is the main diagnostics command. It reports:
+
+- config sanity
+- SSH reachability
+- host key verification
+- authentication
+- Docker reachability over the SSH tunnel
+
+Use `korgi check --json` for machine-readable output.
 
 ## Supported key types
 

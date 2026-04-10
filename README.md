@@ -158,7 +158,7 @@ rollback_keep = 2
 korgi check
 ```
 
-Tests SSH connectivity and Docker access on all configured hosts.
+Runs doctor-style diagnostics for config, SSH readiness, host key verification, and Docker access on all configured hosts.
 
 ### Deploy
 
@@ -210,7 +210,7 @@ Restarts the previous generation's containers and stops the current ones.
 | Command | Description |
 |---------|-------------|
 | `korgi init` | Scaffold a `korgi.toml` config file |
-| `korgi check` | Validate config and test SSH/Docker connectivity |
+| `korgi check` | Run doctor-style diagnostics for config, SSH, host keys, and Docker |
 | `korgi status` | Show running containers across all hosts |
 | `korgi deploy` | Zero-downtime deployment |
 | `korgi rollback` | Roll back to the previous generation |
@@ -319,6 +319,9 @@ Korgi uses pure Rust SSH (no system `ssh` binary needed). Authentication methods
 - **Key file** -- set `ssh_key` on the host. Passphrase-protected keys are supported (you'll be prompted).
 - **Default keys** -- if no `ssh_key` is set, Korgi tries `~/.ssh/id_ed25519`, `~/.ssh/id_rsa`, `~/.ssh/id_ecdsa` in order.
 - **Passphrases** -- if a key is encrypted, Korgi prompts for the passphrase interactively and allows a few retries before falling back to other auth methods.
+- **Host key verification** -- Korgi verifies every SSH host against `~/.ssh/known_hosts`.
+
+If a host key is missing and Korgi is running in an interactive terminal, it prompts to trust the key and appends it to `~/.ssh/known_hosts`. If the host key mismatches an existing entry, Korgi refuses to connect. In non-interactive runs, missing host keys fail closed and must be pre-seeded in `known_hosts`.
 
 ### Port Allocation
 

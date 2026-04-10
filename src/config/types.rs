@@ -398,12 +398,23 @@ impl Config {
         if self.hosts.is_empty() {
             anyhow::bail!("at least one host must be defined");
         }
+        let mut seen_host_names = std::collections::HashSet::new();
         for host in &self.hosts {
             if host.name.is_empty() {
                 anyhow::bail!("host name cannot be empty");
             }
+            if !seen_host_names.insert(&host.name) {
+                anyhow::bail!("duplicate host name '{}'", host.name);
+            }
             if host.address.is_empty() {
                 anyhow::bail!("host '{}' address cannot be empty", host.name);
+            }
+            if host
+                .docker_socket
+                .as_deref()
+                .is_some_and(|socket| socket.trim().is_empty())
+            {
+                anyhow::bail!("host '{}' docker_socket cannot be empty", host.name);
             }
         }
         // Validate traefik config
@@ -944,6 +955,24 @@ mod tests {
             .push(ServiceConfig::test_service("api", "other:latest"));
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("duplicate service name"));
+    }
+
+    #[test]
+    fn test_validate_duplicate_host_names() {
+        let mut config = minimal_config();
+        config
+            .hosts
+            .push(HostConfig::test_host("web1", "192.168.1.11"));
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate host name"));
+    }
+
+    #[test]
+    fn test_validate_empty_docker_socket() {
+        let mut config = minimal_config();
+        config.hosts[0].docker_socket = Some("   ".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("docker_socket cannot be empty"));
     }
 
     // --- SSH port ---

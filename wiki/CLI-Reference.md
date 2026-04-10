@@ -23,10 +23,11 @@ Fails if `korgi.toml` already exists.
 
 ### `korgi check`
 
-Validate configuration, test SSH connectivity, and verify Docker access on all hosts.
+Run doctor-style diagnostics for configuration, SSH connectivity, host key verification, and Docker access on all hosts.
 
 ```sh
 korgi check
+korgi check --json
 ```
 
 ### `korgi status`

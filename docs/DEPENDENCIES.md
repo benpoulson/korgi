@@ -109,8 +109,8 @@ korgi
 ### bollard SSH on systems without OpenSSH
 The `openssh` crate requires a system SSH binary (`ssh` command). On minimal Docker images or Windows without OpenSSH, this will fail. Korgi is primarily designed for Linux/macOS.
 
-### russh host key verification
-Currently `check_server_key` always returns `true` (accepts any host key). For production use, this should verify against `~/.ssh/known_hosts`. The russh API provides the server's public key but korgi must implement the checking logic.
+### SSH host key verification
+Korgi verifies remote SSH hosts against `~/.ssh/known_hosts` through the `ssh2` crate. Unknown hosts can be trusted interactively and persisted to the OpenSSH known-hosts file. Mismatches fail closed.
 
 ### tabled rendering in narrow terminals
 Very wide tables (many columns, long image names) may wrap or truncate in narrow terminals. Consider `--json` output for scripting.
