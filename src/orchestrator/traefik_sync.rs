@@ -217,6 +217,7 @@ mod tests {
                 entrypoints: HashMap::new(),
                 network: "korgi-traefik".to_string(),
                 acme: None,
+                passthroughs: Vec::new(),
             }),
             services: vec![{
                 let mut svc = ServiceConfig::test_service("api", "myapp/api:v1");

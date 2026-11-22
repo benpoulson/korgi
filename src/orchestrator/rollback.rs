@@ -413,6 +413,7 @@ mod tests {
             entrypoints: HashMap::new(),
             network: "korgi-traefik".to_string(),
             acme: None,
+            passthroughs: Vec::new(),
         });
         let svc = &mut config.services[0];
         svc.routing = Some(RoutingConfig {

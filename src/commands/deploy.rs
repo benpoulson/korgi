@@ -267,6 +267,7 @@ mod tests {
                 entrypoints: HashMap::new(),
                 network: "korgi-traefik".to_string(),
                 acme: None,
+                passthroughs: Vec::new(),
             }),
             services: ["api", "web"]
                 .iter()

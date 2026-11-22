@@ -82,6 +82,29 @@ Optional. Enables automatic TLS via Let's Encrypt.
 
 When ACME is configured with both `web` and `websecure` entrypoints, HTTP-to-HTTPS redirect is enabled automatically.
 
+### `[[traefik.passthroughs]]`
+
+Routes a hostname to a fixed port on one of the hosts, for apps korgi does not deploy (e.g. a self-hosted Mautic or Chatwoot started some other way).
+
+```toml
+[[traefik.passthroughs]]
+name = "mautic"
+host = "mautic.example.com"
+target_host = "hetzner-1"   # a [[hosts]] name; its internal_address is used
+target_port = 9999
+# entrypoints = ["websecure"]  # default
+# tls = true                    # default: terminate TLS with the ACME resolver
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Unique; becomes the router/service name `<project>-passthrough-<name>` |
+| `host` | string | required | Hostname to route |
+| `target_host` | string | required | Host the app runs on |
+| `target_port` | integer | required | Port the app listens on, on that host |
+| `entrypoints` | array | `["websecure"]` | Traefik entrypoints |
+| `tls` | bool | `true` | Use the `letsencrypt` resolver |
+
 ## `[[registries]]`
 
 Define private container registries for image pulls.

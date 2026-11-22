@@ -161,6 +161,31 @@ pub struct TraefikConfig {
     pub network: String,
     #[serde(default)]
     pub acme: Option<AcmeConfig>,
+    /// Routes to things korgi does not deploy (another app on a host port).
+    #[serde(default)]
+    pub passthroughs: Vec<PassthroughConfig>,
+}
+
+/// A Traefik route to a fixed `host:port` that korgi does not manage, e.g. a
+/// self-hosted app running outside korgi on one of the hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PassthroughConfig {
+    pub name: String,
+    /// Hostname to route (`Host(`...`)`).
+    pub host: String,
+    /// Name of the `[[hosts]]` entry the target runs on; its internal address is used.
+    pub target_host: String,
+    pub target_port: u16,
+    /// Entrypoints for the route. Defaults to `websecure`.
+    #[serde(default)]
+    pub entrypoints: Vec<String>,
+    /// Terminate TLS with the ACME resolver. Defaults to true.
+    #[serde(default = "default_true_passthrough")]
+    pub tls: bool,
+}
+
+fn default_true_passthrough() -> bool {
+    true
 }
 
 fn default_traefik_image() -> String {
@@ -524,6 +549,28 @@ impl Config {
         }
         // Validate traefik config
         if let Some(traefik) = &self.traefik {
+            let mut seen_passthroughs = std::collections::HashSet::new();
+            for pt in &traefik.passthroughs {
+                if pt.name.trim().is_empty() {
+                    anyhow::bail!("traefik passthrough name cannot be empty");
+                }
+                if !seen_passthroughs.insert(&pt.name) {
+                    anyhow::bail!("duplicate traefik passthrough '{}'", pt.name);
+                }
+                if pt.host.trim().is_empty() || pt.host.contains('`') {
+                    anyhow::bail!("traefik passthrough '{}' needs a plain hostname", pt.name);
+                }
+                if pt.target_port == 0 {
+                    anyhow::bail!("traefik passthrough '{}' target_port cannot be 0", pt.name);
+                }
+                if !self.hosts.iter().any(|h| h.name == pt.target_host) {
+                    anyhow::bail!(
+                        "traefik passthrough '{}' references unknown host '{}'",
+                        pt.name,
+                        pt.target_host
+                    );
+                }
+            }
             // If hosts is explicitly set, validate references (backwards compat)
             if !traefik.hosts.is_empty() {
                 let host_names: Vec<&str> = self.hosts.iter().map(|h| h.name.as_str()).collect();
@@ -833,6 +880,49 @@ mod tests {
     // --- Validation ---
 
     #[test]
+    fn test_parse_and_validate_passthroughs() {
+        let toml_str = r#"
+            [project]
+            name = "p"
+            [[hosts]]
+            name = "h1"
+            role = "both"
+            address = "10.0.0.1"
+            [traefik]
+            [[traefik.passthroughs]]
+            name = "mautic"
+            host = "mautic.example.com"
+            target_host = "h1"
+            target_port = 9999
+        "#;
+        let mut config: Config = toml::from_str(toml_str).unwrap();
+        let pt = &config.traefik.as_ref().unwrap().passthroughs[0];
+        assert!(pt.tls);
+        assert!(pt.entrypoints.is_empty());
+        config.validate().unwrap();
+
+        config.traefik.as_mut().unwrap().passthroughs[0].target_host = "nope".to_string();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown host")
+        );
+
+        config.traefik.as_mut().unwrap().passthroughs[0].target_host = "h1".to_string();
+        let dup = config.traefik.as_ref().unwrap().passthroughs[0].clone();
+        config.traefik.as_mut().unwrap().passthroughs.push(dup);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
     fn test_validate_empty_project_name() {
         let mut config = minimal_config();
         config.project.name = "".to_string();
@@ -883,6 +973,7 @@ mod tests {
             entrypoints: HashMap::new(),
             network: "korgi-traefik".to_string(),
             acme: None,
+            passthroughs: Vec::new(),
         });
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("unknown host"));
@@ -897,6 +988,7 @@ mod tests {
             entrypoints: HashMap::new(),
             network: "korgi-traefik".to_string(),
             acme: None,
+            passthroughs: Vec::new(),
         });
         assert!(config.validate().is_ok());
     }

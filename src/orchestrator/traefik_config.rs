@@ -129,6 +129,44 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
         services.push(service_yaml);
     }
 
+    if let Some(traefik) = &config.traefik {
+        for pt in &traefik.passthroughs {
+            let Some(target) = config.hosts.iter().find(|h| h.name == pt.target_host) else {
+                continue; // rejected by validation
+            };
+            let name = yaml_str(&format!("{}-passthrough-{}", config.project.name, pt.name));
+            let entrypoints: Vec<String> = if pt.entrypoints.is_empty() {
+                vec!["websecure".to_string()]
+            } else {
+                pt.entrypoints.clone()
+            };
+            let mut router_yaml = format!(
+                "    {}:\n      rule: {}\n      service: {}\n      entryPoints:\n{}",
+                name,
+                yaml_str(&format!("Host(`{}`)", pt.host)),
+                name,
+                entrypoints
+                    .iter()
+                    .map(|ep| format!("        - {}", yaml_str(ep)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            if pt.tls {
+                router_yaml.push_str("\n      tls:\n        certResolver: letsencrypt");
+            }
+            routers.push(router_yaml);
+            services.push(format!(
+                "    {}:\n      loadBalancer:\n        servers:\n          - url: {}",
+                name,
+                yaml_str(&format!(
+                    "http://{}:{}",
+                    target.internal_addr(),
+                    pt.target_port
+                ))
+            ));
+        }
+    }
+
     if routers.is_empty() && services.is_empty() {
         return "# No routable services\nhttp: {}\n".to_string();
     }
@@ -254,6 +292,7 @@ mod tests {
                 entrypoints: HashMap::new(),
                 network: "korgi-traefik".to_string(),
                 acme: None,
+                passthroughs: Vec::new(),
             }),
             services: vec![{
                 let mut svc = ServiceConfig::test_service("api", "myapp/api:v1");
@@ -522,5 +561,29 @@ mod tests {
         assert_eq!(first_host_in_rule("MyHost(`x`)"), None);
         assert_eq!(first_host_in_rule("PathPrefix(`/`)"), None);
         assert_eq!(first_host_in_rule("Host(``)"), None);
+    }
+
+    #[test]
+    fn test_passthrough_routes_to_target_host_port() {
+        let mut config = test_config();
+        config.traefik.as_mut().unwrap().passthroughs.push(
+            crate::config::types::PassthroughConfig {
+                name: "mautic".to_string(),
+                host: "mautic.example.com".to_string(),
+                target_host: "web2".to_string(),
+                target_port: 9999,
+                entrypoints: vec![],
+                tls: true,
+            },
+        );
+        let yaml = generate_dynamic_config(&config, &LiveState { containers: vec![] });
+        assert!(yaml.contains("\"myapp-passthrough-mautic\":"), "{yaml}");
+        assert!(
+            yaml.contains("rule: \"Host(`mautic.example.com`)\""),
+            "{yaml}"
+        );
+        assert!(yaml.contains("- \"websecure\""), "{yaml}");
+        assert!(yaml.contains("certResolver: letsencrypt"), "{yaml}");
+        assert!(yaml.contains("url: \"http://10.0.0.2:9999\""), "{yaml}");
     }
 }
