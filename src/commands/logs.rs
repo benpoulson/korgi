@@ -43,13 +43,13 @@ pub async fn run(
 
         let mut stream = docker.logs(&container.id, follow, "100");
         while let Some(result) = stream.next().await {
-            match result {
-                Ok(log) => print!("{}", log),
-                Err(e) => {
-                    output::error(&format!("Log error: {}", e));
-                    break;
-                }
-            }
+            let log = result.with_context(|| {
+                format!(
+                    "Failed to read logs of {} on {}",
+                    container.name, container.host_name
+                )
+            })?;
+            print!("{}", log);
         }
     }
 
