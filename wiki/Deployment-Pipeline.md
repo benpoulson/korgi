@@ -1,6 +1,6 @@
 # Deployment Pipeline
 
-Korgi's zero-downtime deployment follows a 7-phase pipeline. The critical ordering ensures traffic is shifted to new containers **before** old ones are stopped.
+Korgi's zero-downtime deployment follows an 8-phase pipeline. The critical ordering ensures traffic is shifted to new containers **before** old ones are stopped.
 
 ## Phases
 
@@ -8,14 +8,23 @@ Korgi's zero-downtime deployment follows a 7-phase pipeline. The critical orderi
 1. PREPARE       -- query live state, compute placement, find free ports
 2. PULL          -- pull image on target hosts
 3. START GREEN   -- create new containers with host port bindings
-4. HEALTH CHECK  -- wait for containers to become healthy
-   |-- failure   -- stop & remove new containers, abort (old gen untouched)
-5. SYNC CONFIG   -- update Traefik routing to point to new containers
-6. DRAIN OLD     -- gracefully stop ALL old generation containers
-7. CLEANUP       -- remove containers beyond rollback_keep
+4. HEALTH CHECK  -- wait for all new containers (every selected service) to be healthy
+   |-- failure   -- remove ALL new containers, abort (old gens untouched)
+5. SYNC CONFIG   -- update Traefik on EVERY lb host, read the file back to confirm
+   |-- failure   -- abort without draining (old and new both keep running)
+6. DRAIN OLD     -- gracefully stop ALL old generation containers (concurrently)
+7. SYNC CONFIG   -- remove drained containers from routing (always attempted)
+8. CLEANUP       -- remove generations beyond rollback_keep
 ```
 
-The old generation is **never stopped** until Traefik has been updated to route traffic to the new containers (phase 5). This is what makes the deployment truly zero-downtime.
+The old generation is **never stopped** unless the new containers are verified healthy **and** every Traefik host has confirmed the new routing config (phase 5). This is what makes the deployment truly zero-downtime.
+
+When several services are deployed together, phases 1-4 run for all of them before anything is routed. If any service fails, the new containers of every service are removed and nothing changes.
+
+### Interrupting a deploy (Ctrl-C)
+
+- Before phase 5: korgi removes every container it created and exits; old containers were never touched.
+- From phase 5 on: korgi finishes the syncs and the drain so routing and containers stay consistent, then exits.
 
 ## Phase details
 
@@ -36,44 +45,55 @@ The old generation is **never stopped** until Traefik has been updated to route 
 
 - Ensures the Docker network exists on target hosts
 - Creates new containers with:
-  - Korgi metadata labels (`korgi.project`, `korgi.service`, `korgi.generation`, `korgi.instance`)
+  - Korgi metadata labels (`korgi.project`, `korgi.service`, `korgi.generation`, `korgi.instance`, `korgi.image`, `korgi.host_port`)
   - Traefik routing labels (if service has `[routing]`)
-  - Host port bindings (if `host_base` or `host` configured)
+  - Host port bindings (if `host_base` configured)
   - Docker HEALTHCHECK (if health mode is `docker`)
+- If creating or starting any container fails, every container created so far is removed
 
 ### 4. HEALTH CHECK
 
-- **Docker mode**: Polls `docker inspect` until `.State.Health.Status == "healthy"`
-- **HTTP mode**: Makes HTTP requests to `internal_address:host_port/health_path`
-- Timeout: `drain_seconds * 2`
-- On failure: stops and removes ALL new containers, old generation keeps serving
+- **Docker / image mode**: Polls `docker inspect` until `.State.Health.Status == "healthy"`
+- **HTTP mode**: Makes HTTP requests to `internal_address:host_port/health_path`, using the port the container actually bound
+- **No health config**: containers must stay running with a stable restart count for `start_delay`
+- All containers are checked concurrently under one deadline (see [Health Checks](Health-Checks))
+- On failure: removes ALL new containers, old generation keeps serving
 
 ### 5. SYNC CONFIG
 
 - Regenerates Traefik file-provider YAML with the new container topology
-- Writes it into the Traefik container on all LB hosts
-- **Traffic now routes to new containers** -- old containers still running but receiving no new requests
+- Fails if Traefik is missing or stopped on any LB host (checked before anything is written)
+- Writes it into each Traefik container atomically: to `/etc/korgi/.dynamic.yml.tmp`, then `mv` over `/etc/korgi/dynamic.yml`
+- Reads the file back and compares it; any mismatch or failed command fails the sync
+- **Traffic now routes to old and new containers** -- old containers are only stopped once this succeeded everywhere
 
 ### 6. DRAIN OLD
 
-- Stops ALL running containers from previous generations (not just N-1)
+- Stops ALL running containers from other generations (not just N-1), concurrently
 - Sends `docker stop -t {drain_seconds}` -- SIGTERM, wait, then SIGKILL
+- Refuses to run if the new generation has no running containers
 - Safe because Traefik was already updated in phase 5
 
-### 7. CLEANUP
+### 7. SYNC CONFIG
 
-- Removes containers from generations older than `current - rollback_keep`
-- Force-stops any still-running containers beyond the keep threshold
-- Recent stopped generations are kept for rollback
+- Regenerates the config without the drained containers
+- Always attempted once phase 5 succeeded, even if some stops failed
+
+### 8. CLEANUP
+
+- Keeps the `rollback_keep` stopped generations that served most recently (by container start time, so a known-good generation you rolled back to is kept even if higher-numbered generations exist)
+- Never removes the current generation, the rollback target, or any running container
 
 ## Port allocation
 
-When using `host_base` ports, each generation gets a unique port range to avoid collisions during deployment:
+When using `host_base` ports, each generation gets its own block of `replicas` consecutive ports so old and new containers can run side by side:
 
-- Generation 1: `host_base + 0`, `host_base + 1`, ...
-- Generation 2: `host_base + replicas`, `host_base + replicas + 1`, ...
+- Generation 1 prefers `host_base + 0`, `host_base + 1`, ...
+- Generation 2 prefers `host_base + replicas`, `host_base + replicas + 1`, ...
 
-If the calculated ports are already occupied (by another service or leftover containers), korgi automatically finds the next free range.
+If the preferred block is occupied -- by a running container, or by the recorded port of any stopped korgi container (rollback targets keep their ports) -- korgi moves to the next free block, wrapping around within `host_base..=65535`.
+
+The port each container got is recorded in its `korgi.host_port` label. Traefik routing and HTTP health checks read it from there; it is never recomputed from the config. Containers created by older korgi versions without the label are handled by reading their Docker port bindings.
 
 ## Error boundaries
 
@@ -84,17 +104,20 @@ The critical invariant: **the old generation is never stopped until Traefik has 
 | PULL | Image not found | No changes made |
 | START GREEN | Container creation fails | Clean up new containers, old gen serves |
 | HEALTH CHECK | Timeout or unhealthy | Remove new containers, old gen serves |
-| DRAIN OLD | Stop fails | New gen already serving, recoverable |
+| SYNC CONFIG | Traefik missing/stopped, write or read-back fails | Nothing drained; old and new both running |
+| DRAIN OLD | Stop fails | New gen serving; final sync still runs; error reported |
 | CLEANUP | Remove fails | Stale containers remain (harmless) |
 
 ## Rollback
 
-`korgi rollback --service <name>` finds the most recent stopped generation and:
+`korgi rollback --service <name>` targets the highest stopped generation below the current one (the current generation is the highest one with running containers) and:
 
-1. Verifies the image exists (re-pulls if garbage-collected)
-2. Starts the old containers (labels still intact)
-3. Stops the current generation
-4. Syncs Traefik config
+1. Verifies the image exists (re-pulls with registry credentials if garbage-collected)
+2. Starts the target's containers (labels and host ports still intact)
+3. Health-checks them (same rules as a deploy); on failure they are stopped again and nothing else changes
+4. Syncs Traefik (target and current both routed)
+5. Stops every other running generation
+6. Syncs Traefik again
 
 ## Dry run
 

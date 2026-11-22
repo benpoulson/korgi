@@ -98,14 +98,15 @@ Containers bind to host ports so Traefik can reach them across the network:
 ```toml
 [services.ports]
 container = 8080       # port inside the container
-host_base = 9001       # instance 0 -> 9001, instance 1 -> 9002, ...
+host_base = 9001       # gen 1: 9001, 9002, ...; later gens get the next free block
 ```
 
 | Field | Description |
 |-------|-------------|
 | `container` | Port the app listens on inside the container. |
-| `host` | Fixed host port (only for single replica per host). |
-| `host_base` | Base port for auto-allocation. Each replica gets `host_base + instance_index`. |
+| `host_base` | Base port for auto-allocation. Each generation gets a free block of `replicas` ports; the port a container got is recorded in its `korgi.host_port` label and Traefik routes to exactly that port. |
+
+A fixed `host` port is rejected: blue-green deploys need old and new containers on the same host at the same time.
 
 ## Dedicated load balancer pattern
 

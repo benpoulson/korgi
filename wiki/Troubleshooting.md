@@ -86,8 +86,7 @@ The container started but didn't become healthy in time.
 
 **Fixes**:
 - Check container logs: `korgi logs --service <name>`
-- Increase `drain_seconds` (health timeout = `drain_seconds * 2`)
-- Add `start_period` to allow initialization time
+- Add or increase `start_period` to allow initialization time (the deadline is `start_period + (interval + timeout) * (retries + 1) + start_delay + 15s`)
 - Verify the health endpoint works: `curl http://host:port/health`
 
 ### "No hosts match placement labels"
@@ -134,3 +133,14 @@ For detailed output, set `RUST_LOG`:
 RUST_LOG=debug korgi status
 RUST_LOG=debug korgi deploy
 ```
+
+### "Traefik container not found on <host>" / "Traefik is not running on <host>"
+
+Every deploy, rollback and scale updates Traefik on every LB host and refuses to stop old containers unless all of them confirmed the new config. If Traefik is missing or stopped on one host, the operation stops before draining (old and new containers keep running).
+
+**Fix**: `korgi traefik deploy`, then re-run the command.
+
+### "Traefik config read back ... does not match"
+
+The file written into the Traefik container did not read back identically. Check the `korgi-config` volume on that host (disk full, read-only filesystem) and re-run.
+

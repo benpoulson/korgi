@@ -76,6 +76,7 @@ korgi.service   = "api"         # service name from config
 korgi.generation = "4"          # deployment generation (monotonic)
 korgi.instance  = "0"           # instance index within generation
 korgi.image     = "myapp/api:v2" # image used to create this container
+korgi.host_port = "9003"        # host port it was published on ("" if none)
 ```
 
 **Benefits:**
@@ -111,7 +112,7 @@ Generation 3: Created → Running (current)
                         gen 3 drained after gen 4 is healthy
 ```
 
-Old generations are kept stopped for `rollback_keep` deployments, then removed.
+The *current* generation is the highest one with running containers; new deploys always use `max(all generations) + 1`. Old generations are kept stopped for rollback: the `rollback_keep` most recently serving ones, plus the rollback target, are kept; older ones are removed.
 
 ## Traefik Integration
 
@@ -221,7 +222,7 @@ Then polls `docker inspect` until `.State.Health.Status == "healthy"`.
 start_delay = 5   # seconds to wait after starting
 ```
 
-Korgi waits `start_delay` seconds, then checks the container is still running (hasn't crashed).
+Korgi requires the container to stay running, not restarting, with an unchanged restart count for `start_delay` seconds (so a crash loop under a restart policy is caught).
 
 ## Placement Algorithm
 
