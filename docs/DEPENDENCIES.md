@@ -4,19 +4,14 @@ Notes on each dependency choice, version compatibility, and known issues.
 
 ## Core Dependencies
 
-### russh 0.48 + russh-keys 0.48
-**Purpose:** SSH connections for `korgi check` and `korgi exec`.  
-**Why this version:** Latest stable. Pure Rust, async/tokio-native, no C dependencies.  
+### ssh2 0.9 (libssh2)
+**Purpose:** SSH sessions, host-key verification, and the Docker socket tunnel (`src/ssh/tunnel.rs`).
 **API notes:**
-- `client::Handler` requires `#[async_trait]` -- the trait uses async methods with lifetime constraints
-- `check_server_key` receives `ssh_key::PublicKey`, not russh's own type (re-exported from `ssh-key` crate)
-- `authenticate_publickey` takes `Arc<PrivateKey>`, loaded via `russh_keys::load_secret_key`
-- No built-in SSH agent support via method name `authenticate_publickey_with_agent` -- must use explicit key path
-- `channel.wait()` returns `Option<ChannelMsg>` -- `None` means channel closed
+- `Session` serialises channel operations; the tunnel runs the session non-blocking with one pump thread per host, and `exec` shares a lock with channel opens.
+- In non-blocking mode a write may return `EAGAIN` after sending part of a packet; libssh2 requires the same data to be resent before anything else.
+- Do not call `Channel::flush()` on the tunnel: it discards unread incoming data.
 
-**Alternatives considered:** `thrussh` (unmaintained predecessor), `ssh2-rs` (C bindings to libssh2).
-
-### bollard 0.20 (with `ssh` feature)
+### bollard 0.20
 **Purpose:** Docker API client for all container operations.  
 **Why this version:** Latest stable. Has built-in SSH support.  
 **API notes (bollard 0.20 breaking changes from 0.18):**
@@ -27,19 +22,18 @@ Notes on each dependency choice, version compatibility, and known issues.
 - `CreateImageOptions.from_image` and `.tag` are `Option<String>` (not bare String)
 - `StopContainerOptions` has `signal: Option<String>` field (must be provided)
 - `StartContainerOptions` is not generic -- use `None::<StartContainerOptions>`
-- `Docker::connect_with_ssh()` signature: `(addr, timeout_secs, api_version, keypair_path)`
+- Connected with `Docker::connect_with_unix()` to the tunnel's local socket.
 - `Docker::ping()` returns `Result<String>` -- needs type annotation `let _: String = ...`
 - `NetworkCreateRequest.name` is `String` (not `Option<String>`)
 - `logs()` returns a `Stream`, not a `Future` -- do NOT `.await` it directly
 
-**SSH feature:** Enabled via `features = ["ssh"]` in Cargo.toml. Uses the `openssh` crate internally to spawn SSH subprocesses. Requires the system SSH binary.
 
 ### clap 4
 **Purpose:** CLI argument parsing.  
 **Notes:** Using derive macros. All subcommands defined in `src/cli/mod.rs`.
 
 ### tokio 1 (full features)
-**Purpose:** Async runtime. Required by both russh and bollard.
+**Purpose:** Async runtime for bollard and the orchestrator.
 
 ### serde 1 + toml 0.8 + serde_json 1
 **Purpose:** Config parsing and JSON output.  
@@ -79,11 +73,8 @@ Notes on each dependency choice, version compatibility, and known issues.
 ### futures 0.3
 **Purpose:** `StreamExt` for consuming Docker log streams and image pull streams.
 
-### ssh-key 0.6
-**Purpose:** `PublicKey` type required by russh's `check_server_key` handler. Re-exported.
-
 ### async-trait 0.1
-**Purpose:** Required for implementing `russh::client::Handler` trait (has async methods with lifetime bounds).
+**Purpose:** Async methods on the Docker traits in `src/docker/traits.rs`.
 
 ---
 
@@ -93,10 +84,8 @@ Notes on each dependency choice, version compatibility, and known issues.
 korgi
 ├── clap (CLI)
 ├── toml + serde (config)
-├── russh + russh-keys + ssh-key + async-trait (SSH)
-├── bollard (Docker API)
-│   └── openssh (SSH transport, via "ssh" feature)
-│       └── spawns system ssh binary
+├── ssh2 (SSH session + Docker socket tunnel)
+├── bollard (Docker API, over the tunnel's local Unix socket)
 ├── tokio (async runtime)
 ├── tracing (logging)
 ├── tabled + indicatif + console (output)
@@ -105,9 +94,6 @@ korgi
 ```
 
 ## Known Issues
-
-### bollard SSH on systems without OpenSSH
-The `openssh` crate requires a system SSH binary (`ssh` command). On minimal Docker images or Windows without OpenSSH, this will fail. Korgi is primarily designed for Linux/macOS.
 
 ### SSH host key verification
 Korgi verifies remote SSH hosts against `~/.ssh/known_hosts` through the `ssh2` crate. Unknown hosts can be trusted interactively and persisted to the OpenSSH known-hosts file. Mismatches fail closed.
