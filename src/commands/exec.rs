@@ -50,10 +50,19 @@ pub async fn run(
 
     if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
         use futures::StreamExt;
-        while let Some(Ok(msg)) = output.next().await {
+        while let Some(msg) = output.next().await {
+            let msg = msg.context("Exec output stream failed")?;
             print!("{}", msg);
         }
     }
 
-    Ok(())
+    let inspect = docker
+        .client()
+        .inspect_exec(&exec.id)
+        .await
+        .context("Failed to inspect exec")?;
+    match inspect.exit_code {
+        Some(0) | None => Ok(()),
+        Some(code) => anyhow::bail!("Command exited with code {} in {}", code, container.name),
+    }
 }
