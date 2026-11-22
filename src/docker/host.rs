@@ -13,11 +13,18 @@ use tracing::{debug, instrument};
 use super::traits::DockerHostApi;
 use crate::config::types::HostConfig;
 use crate::ssh::SshSession;
+use crate::ssh::tunnel::Tunnel;
+
+/// Default timeout for a Docker API request (until response headers).
+const CLIENT_TIMEOUT_SECS: u64 = 120;
 
 /// Docker client connected to a remote host via SSH.
 pub struct DockerHost {
     client: Docker,
     pub host_name: String,
+    /// Keeps the SSH tunnel (and its private socket directory) alive for as
+    /// long as the client may use it. `None` for a local Docker connection.
+    _tunnel: Option<Tunnel>,
 }
 
 impl DockerHost {
@@ -48,48 +55,20 @@ impl DockerHost {
             docker_socket
         );
 
-        // Create a local Unix socket for bollard to connect to
-        let socket_dir = std::env::temp_dir().join("korgi");
-        std::fs::create_dir_all(&socket_dir).ok();
-        let socket_path = socket_dir.join(format!("{}.sock", host.name));
+        // Bridge a private local Unix socket to the remote Docker socket.
+        let tunnel = ssh
+            .start_tunnel(docker_socket)
+            .with_context(|| format!("Failed to start SSH tunnel to {}", host.name))?;
+        let socket_path = tunnel.socket_path().to_str().with_context(|| {
+            format!(
+                "Tunnel socket path {} is not valid UTF-8",
+                tunnel.socket_path().display()
+            )
+        })?;
 
-        // Clean up stale socket
-        if socket_path.exists() {
-            std::fs::remove_file(&socket_path).ok();
-        }
-
-        let remote_socket = docker_socket.to_string();
-        let session = ssh.session().clone();
-        let host_dbg = host.name.clone();
-
-        let std_listener = std::os::unix::net::UnixListener::bind(&socket_path)
-            .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
-
-        std::thread::spawn(move || {
-            for stream in std_listener.incoming() {
-                let Ok(local_stream) = stream else { break };
-                match session.channel_direct_streamlocal(&remote_socket, None) {
-                    Ok(channel) => {
-                        if let Err(e) = proxy_channel(channel, &local_stream) {
-                            tracing::debug!("Proxy error on {}: {}", host_dbg, e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "channel_direct_streamlocal failed on {}: {} (code: {:?})",
-                            host_dbg,
-                            e,
-                            e.code()
-                        );
-                    }
-                }
-            }
-        });
-
-        // Connect bollard to the local Unix socket
         let client = Docker::connect_with_unix(
-            socket_path.to_str().unwrap(),
-            120,
+            socket_path,
+            CLIENT_TIMEOUT_SECS,
             bollard::API_DEFAULT_VERSION,
         )
         .with_context(|| format!("Failed to connect bollard on {}", host.name))?;
@@ -104,6 +83,7 @@ impl DockerHost {
         Ok(Self {
             client,
             host_name: host.name.clone(),
+            _tunnel: Some(tunnel),
         })
     }
 
@@ -114,6 +94,7 @@ impl DockerHost {
         Ok(Self {
             client,
             host_name: "local".to_string(),
+            _tunnel: None,
         })
     }
 
@@ -382,47 +363,6 @@ fn parse_image_ref(image: &str) -> (&str, &str) {
         }
     }
     (image, "latest")
-}
-
-/// Bidirectional copy between a local Unix stream and an ssh2 channel.
-fn proxy_channel(mut channel: ssh2::Channel, local: &std::os::unix::net::UnixStream) -> Result<()> {
-    use std::io::{Read, Write};
-
-    local.set_read_timeout(Some(std::time::Duration::from_millis(50)))?;
-
-    let mut local_r = local.try_clone()?;
-    let mut local_w = local.try_clone()?;
-    let mut buf = vec![0u8; 65536];
-
-    loop {
-        // local -> channel
-        match local_r.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                channel.write_all(&buf[..n]).ok();
-                channel.flush().ok();
-            }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => break,
-        }
-
-        // channel -> local
-        match channel.read(&mut buf) {
-            Ok(0) if channel.eof() => break,
-            Ok(n) if n > 0 => {
-                local_w.write_all(&buf[..n]).ok();
-            }
-            Ok(_) => {}
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => break,
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
