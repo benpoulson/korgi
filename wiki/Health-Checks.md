@@ -120,3 +120,5 @@ healthCheck:
 ```
 
 This lets Traefik independently exclude unhealthy backends from the load balancer pool.
+
+Traefik's probe sends the first hostname in the routing rule (``Host(`api.example.com`)``) as its `Host` header. Without it, the probe would send the backend's IP, which apps with a host allow-list (Django `ALLOWED_HOSTS`, Rails host authorization) reject, and Traefik would mark every backend down. Rules with no `Host(...)` matcher are probed without a hostname, so the health path must accept any `Host` header.

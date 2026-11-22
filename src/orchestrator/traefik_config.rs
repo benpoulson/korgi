@@ -118,6 +118,12 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
                 yaml_str(&health.interval),
                 yaml_str(&health.timeout)
             ));
+            // Without a hostname Traefik probes with the backend IP as the Host
+            // header; apps with a host allow-list answer 400 and Traefik then
+            // marks every backend down. Probe with the routed hostname instead.
+            if let Some(host) = first_host_in_rule(&routing.rule) {
+                service_yaml.push_str(&format!("\n          hostname: {}", yaml_str(&host)));
+            }
         }
 
         services.push(service_yaml);
@@ -186,6 +192,33 @@ fn build_server_list(
     }
 
     urls
+}
+
+/// First hostname matched by a `Host(...)` matcher in a Traefik rule, e.g.
+/// ``Host(`api.example.com`) && PathPrefix(`/v1`)`` → `api.example.com`.
+/// `HostRegexp` and `HostSNI` are not hostnames and are ignored.
+fn first_host_in_rule(rule: &str) -> Option<String> {
+    let mut rest = rule;
+    while let Some(idx) = rest.find("Host(") {
+        let preceded_by_ident = rest[..idx]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let args = &rest[idx + "Host(".len()..];
+        if !preceded_by_ident {
+            let args = args.trim_start();
+            if let Some(quoted) = args.strip_prefix('`')
+                && let Some(end) = quoted.find('`')
+            {
+                let host = quoted[..end].trim();
+                if !host.is_empty() {
+                    return Some(host.to_string());
+                }
+            }
+        }
+        rest = args;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -295,6 +328,8 @@ mod tests {
         assert!(yaml.contains("http://10.0.0.1:9009")); // instance 2 on web1
         assert!(yaml.contains("healthCheck"));
         assert!(yaml.contains("/health"));
+        // Traefik probes with the routed hostname, not the backend IP
+        assert!(yaml.contains("hostname: \"api.example.com\""), "{yaml}");
         assert!(yaml.contains("certResolver: letsencrypt"));
     }
 
@@ -466,5 +501,26 @@ mod tests {
         assert_eq!(decoded, config.services[0].routing.as_ref().unwrap().rule);
         assert!(quoted.contains(r#"\\d"#));
         assert!(quoted.contains(r#"\""#));
+    }
+
+    #[test]
+    fn test_first_host_in_rule() {
+        assert_eq!(
+            first_host_in_rule("Host(`api.example.com`)").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(
+            first_host_in_rule("PathPrefix(`/v1`) && Host( `a.example.com` , `b.example.com`)")
+                .as_deref(),
+            Some("a.example.com")
+        );
+        assert_eq!(
+            first_host_in_rule("HostRegexp(`^.+\\.example\\.com$`)"),
+            None
+        );
+        assert_eq!(first_host_in_rule("HostSNI(`*`)"), None);
+        assert_eq!(first_host_in_rule("MyHost(`x`)"), None);
+        assert_eq!(first_host_in_rule("PathPrefix(`/`)"), None);
+        assert_eq!(first_host_in_rule("Host(``)"), None);
     }
 }
