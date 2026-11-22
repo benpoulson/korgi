@@ -82,6 +82,29 @@ Optional. Enables automatic TLS via Let's Encrypt.
 
 When ACME is configured with both `web` and `websecure` entrypoints, HTTP-to-HTTPS redirect is enabled automatically.
 
+### `[[traefik.passthroughs]]`
+
+Routes a hostname to a fixed port on one of the hosts, for apps korgi does not deploy (e.g. a self-hosted Mautic or Chatwoot started some other way).
+
+```toml
+[[traefik.passthroughs]]
+name = "mautic"
+host = "mautic.example.com"
+target_host = "hetzner-1"   # a [[hosts]] name; its internal_address is used
+target_port = 9999
+# entrypoints = ["websecure"]  # default
+# tls = true                    # default: terminate TLS with the ACME resolver
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Unique; becomes the router/service name `<project>-passthrough-<name>` |
+| `host` | string | required | Hostname to route |
+| `target_host` | string | required | Host the app runs on |
+| `target_port` | integer | required | Port the app listens on, on that host |
+| `entrypoints` | array | `["websecure"]` | Traefik entrypoints |
+| `tls` | bool | `true` | Use the `letsencrypt` resolver |
+
 ## `[[registries]]`
 
 Define private container registries for image pulls.
@@ -137,12 +160,14 @@ Health check configuration. See [Health Checks](Health-Checks) for full details.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `path` | string | yes | | HTTP path to check (e.g. `/health`). |
-| `mode` | `"docker"` / `"http"` | no | `"docker"` | `docker` runs a command inside the container. `http` has korgi poll externally. |
-| `interval` | string | no | `"5s"` | Time between checks. |
-| `timeout` | string | no | `"3s"` | Timeout per check. |
+| `path` | string | for `docker`/`http` | | HTTP path to check (e.g. `/health`). |
+| `mode` | `"docker"` / `"http"` / `"image"` | no | `"docker"` | `docker` runs a command inside the container. `http` has korgi poll externally (needs `host_base`). `image` keeps the image's own HEALTHCHECK. |
+| `interval` | duration | no | `"5s"` | Time between checks. |
+| `timeout` | duration | no | `"3s"` | Timeout per check. |
 | `retries` | integer | no | `3` | Failures before unhealthy. |
-| `start_period` | string | no | | Grace period before checks count. |
+| `start_period` | duration | no | | Grace period before checks count. |
+
+Durations use Go syntax (`500ms`, `5s`, `1m30s`, `1h`) and are validated strictly; a bare number such as `"5"` is rejected.
 
 ### `[services.routing]`
 
@@ -194,8 +219,8 @@ lb_strategy = "leastconnections"
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `container` | integer | yes | | Port inside the container. |
-| `host` | integer | no | | Fixed host port (only for single replica per host). |
-| `host_base` | integer | no | | Base port for auto-allocation. Instance 0 gets `host_base`, instance 1 gets `host_base+1`, etc. Required for cross-host routing. |
+| `host` | integer | no | | **Rejected.** A fixed host port cannot work with blue-green deploys (the new container needs the port while the old one still holds it). Use `host_base`. |
+| `host_base` | integer | no | | Base port for auto-allocation. Each generation gets a free block of `replicas` ports at or above `host_base`; the port each container got is recorded in its `korgi.host_port` label. Required for cross-host routing and `mode = "http"` health checks. |
 
 ### `[services.env]`
 
@@ -227,8 +252,8 @@ REDIS_URL = "redis://10.0.0.1:6379"
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `drain_seconds` | integer | no | `30` | Grace period for stopping old containers (SIGTERM timeout). |
-| `start_delay` | integer | no | `5` | Seconds to wait if no health check is configured. |
-| `rollback_keep` | integer | no | `2` | Number of old generations to keep for rollback. |
+| `start_delay` | integer | no | `5` | Seconds a container without a health check must stay running with a stable restart count. |
+| `rollback_keep` | integer | no | `2` | Number of stopped generations to keep for rollback (the most recently serving ones; the rollback target is always kept). |
 
 ## Environment Overlays
 

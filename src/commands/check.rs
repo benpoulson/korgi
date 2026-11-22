@@ -418,7 +418,8 @@ fn duplicate_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
 
     let mut duplicates = counts
         .into_iter()
-        .filter_map(|(value, count)| (count > 1).then(|| value.to_string()))
+        .filter(|(_, count)| *count > 1)
+        .map(|(value, _)| value.to_string())
         .collect::<Vec<_>>();
     duplicates.sort();
     duplicates

@@ -2,7 +2,7 @@
 
 ## ADR-001: Use bollard's built-in SSH instead of custom transport
 
-**Status:** Accepted  
+**Status:** Superseded -- the Docker API now runs over an ssh2 `direct-streamlocal` tunnel (`src/ssh/tunnel.rs`, see ARCHITECTURE.md "Connection Model").  
 **Date:** 2026-04-04
 
 ### Context

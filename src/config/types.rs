@@ -161,6 +161,31 @@ pub struct TraefikConfig {
     pub network: String,
     #[serde(default)]
     pub acme: Option<AcmeConfig>,
+    /// Routes to things korgi does not deploy (another app on a host port).
+    #[serde(default)]
+    pub passthroughs: Vec<PassthroughConfig>,
+}
+
+/// A Traefik route to a fixed `host:port` that korgi does not manage, e.g. a
+/// self-hosted app running outside korgi on one of the hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PassthroughConfig {
+    pub name: String,
+    /// Hostname to route (`Host(`...`)`).
+    pub host: String,
+    /// Name of the `[[hosts]]` entry the target runs on; its internal address is used.
+    pub target_host: String,
+    pub target_port: u16,
+    /// Entrypoints for the route. Defaults to `websecure`.
+    #[serde(default)]
+    pub entrypoints: Vec<String>,
+    /// Terminate TLS with the ACME resolver. Defaults to true.
+    #[serde(default = "default_true_passthrough")]
+    pub tls: bool,
+}
+
+fn default_true_passthrough() -> bool {
+    true
 }
 
 fn default_traefik_image() -> String {
@@ -221,7 +246,8 @@ fn default_restart() -> String {
 }
 
 /// Health check mode: "docker" runs a command inside the container,
-/// "http" has korgi poll the endpoint via the host port from outside.
+/// "http" has korgi poll the endpoint via the host port from outside,
+/// "image" keeps the image's own HEALTHCHECK and polls Docker's health status.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthMode {
@@ -230,12 +256,19 @@ pub enum HealthMode {
     Docker,
     /// HTTP poll from korgi via host_base port. Works with FROM scratch images.
     Http,
+    /// Use the HEALTHCHECK baked into the image (no override) and poll Docker's
+    /// health status. Falls back to a running/restart-stability check when the
+    /// image defines no HEALTHCHECK.
+    Image,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
+    /// HTTP path to check. Required for "docker" and "http" modes; optional for
+    /// "image" mode (only used for Traefik's own health check when set).
+    #[serde(default)]
     pub path: String,
-    /// "docker" (default) or "http". Use "http" for FROM scratch images with no shell.
+    /// "docker" (default), "http" or "image". Use "http" for FROM scratch images with no shell.
     #[serde(default)]
     pub mode: HealthMode,
     #[serde(default = "default_health_interval")]
@@ -375,6 +408,103 @@ impl ServiceConfig {
     }
 }
 
+impl ServiceConfig {
+    /// Validate the `[services.health]` section: durations must parse strictly and
+    /// HTTP-based modes need a path.
+    pub fn validate_health(&self) -> anyhow::Result<()> {
+        use super::duration::parse_duration;
+        let Some(health) = &self.health else {
+            return Ok(());
+        };
+        let field = |name: &str, value: &str| -> anyhow::Result<std::time::Duration> {
+            parse_duration(value)
+                .map_err(|e| anyhow::anyhow!("service '{}' health.{}: {}", self.name, name, e))
+        };
+        if field("interval", &health.interval)?.is_zero() {
+            anyhow::bail!(
+                "service '{}' health.interval must be greater than 0",
+                self.name
+            );
+        }
+        if field("timeout", &health.timeout)?.is_zero() {
+            anyhow::bail!(
+                "service '{}' health.timeout must be greater than 0",
+                self.name
+            );
+        }
+        if let Some(sp) = &health.start_period {
+            field("start_period", sp)?;
+        }
+        match health.mode {
+            HealthMode::Docker | HealthMode::Http => {
+                if !health.path.starts_with('/') {
+                    anyhow::bail!(
+                        "service '{}' health.path must start with '/' (got '{}')",
+                        self.name,
+                        health.path
+                    );
+                }
+            }
+            HealthMode::Image => {
+                if !health.path.is_empty() && !health.path.starts_with('/') {
+                    anyhow::bail!(
+                        "service '{}' health.path must start with '/' (got '{}')",
+                        self.name,
+                        health.path
+                    );
+                }
+            }
+        }
+        if health.mode == HealthMode::Http
+            && self.ports.as_ref().is_none_or(|p| p.host_base.is_none())
+        {
+            anyhow::bail!(
+                "service '{}' uses health mode \"http\" but has no ports.host_base; \
+                 korgi needs a published host port to reach the container",
+                self.name
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate `[services.ports]`.
+    ///
+    /// A fixed `host` port cannot work with blue-green deploys: the new container is
+    /// started while the old one still holds the port on the same host, so the bind
+    /// always fails. `host_base` allocates a fresh port per container instead.
+    pub fn validate_ports(&self) -> anyhow::Result<()> {
+        let Some(ports) = &self.ports else {
+            return Ok(());
+        };
+        if let Some(fixed) = ports.host {
+            anyhow::bail!(
+                "service '{}' sets ports.host = {}: a fixed host port cannot be used with \
+                 korgi's blue-green deploys (the new container would need the port while the \
+                 old one still holds it, and replicas on one host would collide). \
+                 Use ports.host_base instead -- korgi allocates a free port per container \
+                 and routes Traefik to it",
+                self.name,
+                fixed
+            );
+        }
+        if let Some(base) = ports.host_base {
+            if base == 0 {
+                anyhow::bail!("service '{}' ports.host_base cannot be 0", self.name);
+            }
+            let last = base as u32 + self.replicas.saturating_sub(1);
+            if last > u16::MAX as u32 {
+                anyhow::bail!(
+                    "service '{}' ports.host_base {} + {} replicas exceeds port 65535",
+                    self.name,
+                    base,
+                    self.replicas
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Config {
     /// Find a service config by name.
     pub fn find_service(&self, name: &str) -> Option<&ServiceConfig> {
@@ -419,6 +549,28 @@ impl Config {
         }
         // Validate traefik config
         if let Some(traefik) = &self.traefik {
+            let mut seen_passthroughs = std::collections::HashSet::new();
+            for pt in &traefik.passthroughs {
+                if pt.name.trim().is_empty() {
+                    anyhow::bail!("traefik passthrough name cannot be empty");
+                }
+                if !seen_passthroughs.insert(&pt.name) {
+                    anyhow::bail!("duplicate traefik passthrough '{}'", pt.name);
+                }
+                if pt.host.trim().is_empty() || pt.host.contains('`') {
+                    anyhow::bail!("traefik passthrough '{}' needs a plain hostname", pt.name);
+                }
+                if pt.target_port == 0 {
+                    anyhow::bail!("traefik passthrough '{}' target_port cannot be 0", pt.name);
+                }
+                if !self.hosts.iter().any(|h| h.name == pt.target_host) {
+                    anyhow::bail!(
+                        "traefik passthrough '{}' references unknown host '{}'",
+                        pt.name,
+                        pt.target_host
+                    );
+                }
+            }
             // If hosts is explicitly set, validate references (backwards compat)
             if !traefik.hosts.is_empty() {
                 let host_names: Vec<&str> = self.hosts.iter().map(|h| h.name.as_str()).collect();
@@ -452,6 +604,8 @@ impl Config {
             if svc.image.is_empty() {
                 anyhow::bail!("service '{}' image cannot be empty", svc.name);
             }
+            svc.validate_health()?;
+            svc.validate_ports()?;
             if !svc.placement_labels.is_empty() {
                 let has_matching_host = self
                     .hosts
@@ -726,6 +880,49 @@ mod tests {
     // --- Validation ---
 
     #[test]
+    fn test_parse_and_validate_passthroughs() {
+        let toml_str = r#"
+            [project]
+            name = "p"
+            [[hosts]]
+            name = "h1"
+            role = "both"
+            address = "10.0.0.1"
+            [traefik]
+            [[traefik.passthroughs]]
+            name = "mautic"
+            host = "mautic.example.com"
+            target_host = "h1"
+            target_port = 9999
+        "#;
+        let mut config: Config = toml::from_str(toml_str).unwrap();
+        let pt = &config.traefik.as_ref().unwrap().passthroughs[0];
+        assert!(pt.tls);
+        assert!(pt.entrypoints.is_empty());
+        config.validate().unwrap();
+
+        config.traefik.as_mut().unwrap().passthroughs[0].target_host = "nope".to_string();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown host")
+        );
+
+        config.traefik.as_mut().unwrap().passthroughs[0].target_host = "h1".to_string();
+        let dup = config.traefik.as_ref().unwrap().passthroughs[0].clone();
+        config.traefik.as_mut().unwrap().passthroughs.push(dup);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
     fn test_validate_empty_project_name() {
         let mut config = minimal_config();
         config.project.name = "".to_string();
@@ -776,6 +973,7 @@ mod tests {
             entrypoints: HashMap::new(),
             network: "korgi-traefik".to_string(),
             acme: None,
+            passthroughs: Vec::new(),
         });
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("unknown host"));
@@ -790,6 +988,7 @@ mod tests {
             entrypoints: HashMap::new(),
             network: "korgi-traefik".to_string(),
             acme: None,
+            passthroughs: Vec::new(),
         });
         assert!(config.validate().is_ok());
     }
@@ -1170,5 +1369,131 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    fn config_with_service(f: impl FnOnce(&mut ServiceConfig)) -> Config {
+        let mut config = minimal_config();
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        f(&mut svc);
+        config.services = vec![svc];
+        config
+    }
+
+    fn health(mode: HealthMode, path: &str, interval: &str) -> HealthConfig {
+        HealthConfig {
+            mode,
+            path: path.to_string(),
+            interval: interval.to_string(),
+            timeout: "3s".to_string(),
+            retries: 3,
+            start_period: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_health_durations_strict() {
+        for good in ["5s", "500ms", "1m30s", "1h"] {
+            let c =
+                config_with_service(|s| s.health = Some(health(HealthMode::Docker, "/h", good)));
+            assert!(c.validate().is_ok(), "{}", good);
+        }
+        for bad in ["5", "5x", "", "0s"] {
+            let c = config_with_service(|s| s.health = Some(health(HealthMode::Docker, "/h", bad)));
+            let err = c.validate().unwrap_err().to_string();
+            assert!(err.contains("health.interval"), "{}: {}", bad, err);
+        }
+        let c = config_with_service(|s| {
+            let mut h = health(HealthMode::Docker, "/h", "5s");
+            h.start_period = Some("10".to_string());
+            s.health = Some(h);
+        });
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("start_period")
+        );
+    }
+
+    #[test]
+    fn test_validate_health_path_and_modes() {
+        let c = config_with_service(|s| s.health = Some(health(HealthMode::Docker, "", "5s")));
+        assert!(c.validate().is_err(), "docker mode needs a path");
+        let c = config_with_service(|s| s.health = Some(health(HealthMode::Image, "", "5s")));
+        assert!(c.validate().is_ok(), "image mode needs no path");
+        let c = config_with_service(|s| s.health = Some(health(HealthMode::Http, "/h", "5s")));
+        assert!(
+            c.validate().unwrap_err().to_string().contains("host_base"),
+            "http mode needs a published port"
+        );
+        let c = config_with_service(|s| {
+            s.health = Some(health(HealthMode::Http, "/h", "5s"));
+            s.ports = Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: Some(9001),
+            });
+        });
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_image_health_mode() {
+        let toml_str = r#"
+            [project]
+            name = "app"
+            [[hosts]]
+            name = "h1"
+            address = "1.2.3.4"
+            [[services]]
+            name = "web"
+            image = "web:latest"
+            [services.health]
+            mode = "image"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.services[0].health.as_ref().unwrap();
+        assert_eq!(h.mode, HealthMode::Image);
+        assert!(h.path.is_empty());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_fixed_host_port() {
+        let c = config_with_service(|s| {
+            s.ports = Some(PortsConfig {
+                container: 8080,
+                host: Some(9090),
+                host_base: None,
+            })
+        });
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("ports.host") && err.contains("host_base"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_host_base_overflow() {
+        let c = config_with_service(|s| {
+            s.replicas = 10;
+            s.ports = Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: Some(65530),
+            })
+        });
+        assert!(c.validate().unwrap_err().to_string().contains("65535"));
+        let c = config_with_service(|s| {
+            s.replicas = 6;
+            s.ports = Some(PortsConfig {
+                container: 8080,
+                host: None,
+                host_base: Some(65530),
+            })
+        });
+        assert!(c.validate().is_ok());
     }
 }

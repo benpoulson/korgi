@@ -30,39 +30,44 @@ Korgi is a single-binary deployment tool that manages Docker containers across 2
 
 ## Connection Model
 
-### Docker API over SSH (bollard + openssh)
+### Docker API over SSH (ssh2 tunnel + bollard)
 
-Korgi uses bollard's built-in `Docker::connect_with_ssh()` which leverages the `openssh` crate. Under the hood, this spawns an SSH subprocess that tunnels HTTP requests to the remote Docker daemon's Unix socket.
+Korgi opens one SSH session per host with the `ssh2` crate (libssh2) and
+tunnels the Docker API through it (`src/ssh/tunnel.rs`):
 
-```rust
-let client = Docker::connect_with_ssh(
-    "ssh://deploy@192.168.1.10",  // SSH URL
-    120,                           // timeout seconds
-    bollard::API_DEFAULT_VERSION,  // Docker API version
-    Some("/path/to/key".into()),   // optional SSH key path
-)?;
-```
+1. Connect with a TCP timeout (10s per resolved address, override with
+   `KORGI_SSH_CONNECT_TIMEOUT`), handshake and authenticate under a 30s
+   session timeout, verify the host key against `~/.ssh/known_hosts`, enable
+   SSH keepalive (15s).
+2. Switch the session to non-blocking mode and bind a local Unix socket in a
+   private per-process directory (0700, removed when the `DockerHost` is
+   dropped).
+3. bollard connects to that socket. One pump thread per host serves every
+   local connection, each on its own `direct-streamlocal` channel to the
+   remote Docker socket, so a slow or idle connection never blocks another.
+   Buffers are capped (256 KiB per direction) and pause their connection when
+   full. A connection ends when either side closes; one the remote never
+   closes is dropped 120s after the local side finished. Any channel error
+   closes the local socket, so bollard sees an error instead of hanging.
 
-**Why this approach over a custom transport:**
-- bollard's SSH support handles all the HTTP/Unix socket bridging internally
-- No need to write a `ChannelStream` adapter (AsyncRead+AsyncWrite over russh channels)
-- The `openssh` crate reuses the system's SSH configuration (~/.ssh/config, known_hosts, etc.)
-- Simpler error handling -- SSH failures surface as bollard errors
+Docker calls are bounded on top of bollard's 120s request timeout: pulls fail
+after 120s without progress or 30 min in total, stops get the grace period
+plus 30s, execs 60s and fail on a non-zero exit code.
 
-**Why we still have russh:**
-- `korgi check` tests SSH connectivity independently of Docker
-- `korgi exec` can fall back to SSH exec if needed
-- Future: direct `docker` CLI execution over SSH as a fallback transport
+**Why a custom tunnel over bollard's `ssh` feature:** the `openssh`-based
+feature needs a system `ssh` binary and spawns a subprocess per connection;
+the ssh2 tunnel is self-contained and shares one authenticated session (and
+its host-key check) with `korgi check` and `korgi exec`.
 
 ### Alternative approaches considered
 
 | Approach | Pros | Cons | Verdict |
 |----------|------|------|---------|
-| **bollard connect_with_ssh** | Simple, maintained, works | Spawns SSH subprocess per connection | **Chosen** |
-| **russh direct-streamlocal** | Pure Rust, no subprocess | 80-100 lines of ChannelStream adapter code, harder to debug | Rejected for v1 |
+| **ssh2 direct-streamlocal tunnel** | No subprocess, one session per host, full control of timeouts | Tunnel code to maintain (`src/ssh/tunnel.rs`) | **Chosen** |
+| **bollard connect_with_ssh** | Simple | Needs system ssh binary, subprocess per connection | Replaced |
 | **SSH local port forward** | Simple bollard connection | Requires Docker TCP listener on remote (security risk) | Rejected |
 | **SSH exec docker CLI** | Simplest | No structured API, fragile parsing, no streaming, slow | Rejected |
-| **SSH exec socat** | Moderate complexity | Requires socat on remote host | Possible fallback |
+| **SSH exec socat** | Moderate complexity | Requires socat on remote host | Rejected |
 
 ## State Model
 
@@ -76,6 +81,7 @@ korgi.service   = "api"         # service name from config
 korgi.generation = "4"          # deployment generation (monotonic)
 korgi.instance  = "0"           # instance index within generation
 korgi.image     = "myapp/api:v2" # image used to create this container
+korgi.host_port = "9003"        # host port it was published on ("" if none)
 ```
 
 **Benefits:**
@@ -111,7 +117,7 @@ Generation 3: Created → Running (current)
                         gen 3 drained after gen 4 is healthy
 ```
 
-Old generations are kept stopped for `rollback_keep` deployments, then removed.
+The *current* generation is the highest one with running containers; new deploys always use `max(all generations) + 1`. Old generations are kept stopped for rollback: the `rollback_keep` most recently serving ones, plus the rollback target, are kept; older ones are removed.
 
 ## Traefik Integration
 
@@ -221,7 +227,7 @@ Then polls `docker inspect` until `.State.Health.Status == "healthy"`.
 start_delay = 5   # seconds to wait after starting
 ```
 
-Korgi waits `start_delay` seconds, then checks the container is still running (hasn't crashed).
+Korgi requires the container to stay running, not restarting, with an unchanged restart count for `start_delay` seconds (so a crash loop under a restart policy is caught).
 
 ## Placement Algorithm
 

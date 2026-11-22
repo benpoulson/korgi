@@ -214,7 +214,7 @@ korgi scale --service api 8
 korgi rollback --service api
 ```
 
-Restarts the previous generation's containers and stops the current ones.
+Restarts the previous generation's containers, health-checks them, routes Traefik to them, and only then stops every other running generation.
 
 ## Commands
 
@@ -242,15 +242,16 @@ All commands accept `--env <name>` (load `korgi.<name>.toml` overlay), `--config
 1. PREPARE       → query live state, compute placement, find free ports
 2. PULL          → pull image on target hosts
 3. START GREEN   → create new containers with host port bindings
-4. HEALTH CHECK  → wait for containers to become healthy
-   └─ failure    → stop & remove new containers, abort
-5. SYNC CONFIG   → update Traefik to route to both old + new (zero-downtime overlap)
+4. HEALTH CHECK  → wait for ALL new containers to become healthy
+   └─ failure    → remove new containers, abort
+5. SYNC CONFIG   → update Traefik on EVERY lb host (old + new routed), read back to confirm
+   └─ failure    → abort without draining
 6. DRAIN OLD     → gracefully stop ALL old generation containers
 7. SYNC CONFIG   → update Traefik to remove drained containers
-8. CLEANUP       → remove containers beyond rollback_keep
+8. CLEANUP       → remove generations beyond rollback_keep
 ```
 
-The old generation is **never stopped** until Traefik has been updated to route traffic to the new containers (step 5). After draining, Traefik is synced again (step 7) to remove stale URLs. If health checks fail, the new containers are removed and the old ones keep serving traffic.
+The old generation is **never stopped** unless the new containers are verified healthy and every Traefik host has confirmed the new routing config (step 5). After draining, Traefik is synced again (step 7) to remove stale URLs. If health checks fail, the new containers are removed and the old ones keep serving traffic. Ctrl-C before step 5 removes the new containers; after it, korgi finishes the sync and drain first.
 
 ## Cross-Host Load Balancing
 
@@ -342,8 +343,10 @@ Containers bind to host ports so Traefik can reach them across the network:
 ```toml
 [services.ports]
 container = 8080       # port inside the container
-host_base = 9001       # instance 0 → 9001, instance 1 → 9002, ...
+host_base = 9001       # gen 1: 9001, 9002, ...; each generation gets a free block
 ```
+
+The port each container was given is recorded in its `korgi.host_port` label, and Traefik and HTTP health checks use exactly that port. A fixed `host` port is rejected because blue-green deploys run old and new containers on the same host simultaneously.
 
 ## Configuration
 

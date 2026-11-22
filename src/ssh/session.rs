@@ -1,14 +1,37 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use ssh2::{CheckResult, KnownHostFileKind, KnownHostKeyFormat};
-use std::io::{IsTerminal, Read, Write};
-use std::net::TcpStream;
+use std::io::{IsTerminal, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{debug, instrument};
 
+use super::nonblocking::{read_both_until_eof, retry_eagain};
 use crate::config::types::HostConfig;
 
 const MAX_PASSPHRASE_ATTEMPTS: usize = 3;
+
+/// Default TCP connect timeout. Override with `KORGI_SSH_CONNECT_TIMEOUT`
+/// (whole seconds).
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Environment variable overriding the TCP connect timeout (seconds).
+const CONNECT_TIMEOUT_ENV: &str = "KORGI_SSH_CONNECT_TIMEOUT";
+
+/// Timeout for each blocking libssh2 operation during connection setup
+/// (handshake, host key and authentication exchanges).
+const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Interval between SSH keepalive messages.
+pub const KEEPALIVE_INTERVAL_SECS: u32 = 15;
+
+/// Default timeout for commands run with [`SshSession::exec`].
+pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for opening a channel to a remote Unix socket.
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Output from an SSH command execution.
 #[derive(Debug)]
@@ -98,8 +121,15 @@ pub struct SshConnectAttempt {
 }
 
 /// Wrapper around an ssh2 SSH session to a single host.
+///
+/// Once connected the session is in non-blocking mode: every operation on it
+/// must tolerate `LIBSSH2_ERROR_EAGAIN` (see [`super::nonblocking`]). This lets
+/// the Docker tunnel multiplex channels without one stalled channel holding
+/// the session lock for everyone else.
 pub struct SshSession {
     session: ssh2::Session,
+    /// Serialises channel opens: libssh2 keeps channel-open state per session.
+    open_lock: Arc<Mutex<()>>,
     pub host: HostConfig,
 }
 
@@ -133,7 +163,8 @@ impl SshSession {
         };
 
         let addr = format!("{}:{}", host.ssh_address(), host.port);
-        let tcp = match TcpStream::connect(&addr) {
+        let connect_timeout = connect_timeout_from_env(std::env::var(CONNECT_TIMEOUT_ENV).ok());
+        let tcp = match connect_tcp(&addr, connect_timeout) {
             Ok(tcp) => {
                 report.tcp_connect = SshConnectStep::pass(format!("Connected to {}", addr));
                 tcp
@@ -165,6 +196,9 @@ impl SshSession {
             }
         };
         session.set_tcp_stream(tcp);
+        // Bound every blocking libssh2 call made while setting up the session
+        // so an unresponsive server cannot hang the handshake or auth forever.
+        session.set_timeout(duration_to_ms(SESSION_SETUP_TIMEOUT));
         if let Err(e) = session
             .handshake()
             .with_context(|| format!("SSH handshake failed with {}", host.name))
@@ -287,6 +321,7 @@ impl SshSession {
         };
 
         let mut authenticated = false;
+        let mut skipped_passphrase_keys: Vec<String> = Vec::new();
 
         // Try key files
         for key_path in &key_paths {
@@ -302,6 +337,15 @@ impl SshSession {
                     debug!("Authenticated with key {}", key_path);
                     authenticated = true;
                     break;
+                }
+                Err(_) if !is_interactive_terminal() => {
+                    // The key may be encrypted, but nobody can type a passphrase:
+                    // never block on a prompt. Fall through to ssh-agent.
+                    debug!(
+                        "Key {} was not accepted without a passphrase; not prompting (no interactive terminal)",
+                        key_path
+                    );
+                    skipped_passphrase_keys.push(key_path.clone());
                 }
                 Err(_) => {
                     // The key may be encrypted. Allow a few retries before falling back
@@ -363,18 +407,21 @@ impl SshSession {
 
         // Fall back to password
         if !authenticated {
-            let password = match prompt_password(&host.user, host.ssh_address()) {
-                Ok(password) => password,
-                Err(e) => {
-                    report.authentication =
-                        SshConnectStep::fail("Failed to read SSH password", Some(e.to_string()));
-                    return SshConnectAttempt {
-                        report,
-                        session: None,
-                        error: Some(e),
-                    };
-                }
-            };
+            let password =
+                match prompt_password(&host.user, host.ssh_address(), &skipped_passphrase_keys) {
+                    Ok(password) => password,
+                    Err(e) => {
+                        report.authentication = SshConnectStep::fail(
+                            "Failed to read SSH password",
+                            Some(e.to_string()),
+                        );
+                        return SshConnectAttempt {
+                            report,
+                            session: None,
+                            error: Some(e),
+                        };
+                    }
+                };
             if let Err(e) = session
                 .userauth_password(&host.user, &password)
                 .with_context(|| format!("Password auth failed for {}", host.name))
@@ -410,54 +457,97 @@ impl SshSession {
         report.authentication =
             SshConnectStep::pass(format!("Authenticated as {} using SSH", host.user));
 
+        // Detect and prevent idle drops (NAT, firewalls). Keepalives are sent
+        // by whoever drives the session (the Docker tunnel pump).
+        session.set_keepalive(true, KEEPALIVE_INTERVAL_SECS);
+        // From here on nothing may block on the session; see `SshSession` docs.
+        session.set_blocking(false);
+
         debug!("Connected to {}", host.name);
         SshConnectAttempt {
             report,
             session: Some(Self {
                 session,
+                open_lock: Arc::new(Mutex::new(())),
                 host: host.clone(),
             }),
             error: None,
         }
     }
 
-    /// Execute a command on the remote host.
+    /// Execute a command on the remote host with the default timeout.
     pub fn exec(&self, command: &str) -> Result<ExecOutput> {
-        let mut channel = self
-            .session
-            .channel_session()
-            .with_context(|| format!("Failed to open channel on {}", self.host.name))?;
+        self.exec_with_timeout(command, DEFAULT_EXEC_TIMEOUT)
+    }
 
-        channel
-            .exec(command)
-            .with_context(|| format!("Failed to exec on {}", self.host.name))?;
+    /// Execute a command on the remote host, failing after `timeout`.
+    ///
+    /// stdout and stderr are read together so a chatty stderr cannot fill the
+    /// channel window and deadlock the read of stdout.
+    pub fn exec_with_timeout(&self, command: &str, timeout: Duration) -> Result<ExecOutput> {
+        let deadline = Instant::now() + timeout;
+        let host = &self.host.name;
 
-        let mut stdout = String::new();
-        channel.read_to_string(&mut stdout).ok();
+        let mut channel = {
+            let _guard = self.open_lock.lock().unwrap_or_else(|p| p.into_inner());
+            retry_eagain(deadline, "open a session channel", || {
+                self.session.channel_session()
+            })
+            .with_context(|| format!("Failed to open channel on {}", host))?
+        };
 
-        let mut stderr = String::new();
-        channel.stderr().read_to_string(&mut stderr).ok();
+        retry_eagain(deadline, "start the command", || channel.exec(command))
+            .with_context(|| format!("Failed to exec on {}", host))?;
 
-        channel.wait_close().ok();
-        let exit_code = channel.exit_status().ok().map(|c| c as u32);
+        let mut stdout_stream = channel.stream(0);
+        let mut stderr_stream = channel.stderr();
+        let (stdout, stderr) = read_both_until_eof(
+            &mut stdout_stream,
+            &mut stderr_stream,
+            || channel.eof(),
+            deadline,
+        )
+        .with_context(|| format!("Failed to read output of `{}` on {}", command, host))?;
+
+        retry_eagain(deadline, "close the channel", || channel.wait_close())
+            .with_context(|| format!("Failed to close channel on {}", host))?;
+        let exit_code = channel
+            .exit_status()
+            .with_context(|| format!("Failed to read exit status on {}", host))?;
 
         Ok(ExecOutput {
-            stdout,
-            stderr,
-            exit_code,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_code: u32::try_from(exit_code).ok(),
         })
     }
 
     /// Open a direct-streamlocal channel to a Unix socket on the remote host.
+    ///
+    /// The returned channel is in non-blocking mode.
     pub fn channel_direct_streamlocal(&self, socket_path: &str) -> Result<ssh2::Channel> {
-        self.session
-            .channel_direct_streamlocal(socket_path, None)
-            .with_context(|| {
-                format!(
-                    "Failed to open channel to {} on {}",
-                    socket_path, self.host.name
-                )
-            })
+        super::tunnel::open_streamlocal(
+            &self.session,
+            &self.open_lock,
+            socket_path,
+            CHANNEL_OPEN_TIMEOUT,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to open channel to {} on {}",
+                socket_path, self.host.name
+            )
+        })
+    }
+
+    /// Start a local Unix socket tunnel to `remote_socket` on this host.
+    pub fn start_tunnel(&self, remote_socket: &str) -> Result<super::tunnel::Tunnel> {
+        super::tunnel::Tunnel::start(
+            self.session.clone(),
+            self.open_lock.clone(),
+            remote_socket,
+            &self.host.name,
+        )
     }
 
     /// Check if the connection is still alive.
@@ -499,8 +589,27 @@ fn default_key_paths() -> Vec<String> {
     ]
 }
 
+/// Fail instead of prompting when nobody can answer the prompt.
+///
+/// Reading a passphrase or password without a terminal would block forever
+/// (CI, cron, piped input).
+fn ensure_can_prompt(interactive: bool, what: &str) -> Result<()> {
+    if interactive {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{} is required but no interactive terminal is available; load your key into ssh-agent or run korgi from a terminal",
+            what
+        )
+    }
+}
+
 /// Prompt the user for an SSH key passphrase.
 fn prompt_passphrase(key_path: &str, attempt: usize, max_attempts: usize) -> Result<String> {
+    ensure_can_prompt(
+        is_interactive_terminal(),
+        &format!("A passphrase for {}", key_path),
+    )?;
     if max_attempts > 1 {
         eprint!(
             "Enter passphrase for {} (attempt {}/{}): ",
@@ -514,10 +623,67 @@ fn prompt_passphrase(key_path: &str, attempt: usize, max_attempts: usize) -> Res
 }
 
 /// Prompt the user for an SSH password.
-fn prompt_password(user: &str, host: &str) -> Result<String> {
+///
+/// `skipped_keys` lists keys that may be encrypted but could not be unlocked
+/// because no terminal was available; they are named in the error.
+fn prompt_password(user: &str, host: &str, skipped_keys: &[String]) -> Result<String> {
+    let what = if skipped_keys.is_empty() {
+        format!(
+            "SSH password authentication for {}@{} (no key or agent identity was accepted)",
+            user, host
+        )
+    } else {
+        format!(
+            "SSH authentication for {}@{} (key {} may need a passphrase)",
+            user,
+            host,
+            skipped_keys.join(", ")
+        )
+    };
+    ensure_can_prompt(is_interactive_terminal(), &what)?;
     eprint!("{}@{}'s password: ", user, host);
     let password = rpassword::read_password().with_context(|| "Failed to read password")?;
     Ok(password)
+}
+
+/// Parse the connect timeout override; invalid or zero values use the default.
+fn connect_timeout_from_env(value: Option<String>) -> Duration {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_CONNECT_TIMEOUT)
+}
+
+fn duration_to_ms(d: Duration) -> u32 {
+    u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// Connect to `addr` ("host:port"), trying each resolved address with
+/// `timeout` so an unreachable host fails quickly instead of hanging for the
+/// OS default (minutes).
+fn connect_tcp(addr: &str, timeout: Duration) -> std::io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
+    connect_any(&addrs, timeout)
+}
+
+fn connect_any(addrs: &[SocketAddr], timeout: Duration) -> std::io::Result<TcpStream> {
+    let mut last_err = None;
+    for sock_addr in addrs {
+        match TcpStream::connect_timeout(sock_addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                debug!("TCP connect to {} failed: {}", sock_addr, e);
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "address resolved to no socket addresses",
+        )
+    }))
 }
 
 fn verify_host_key(
@@ -693,6 +859,59 @@ mod tests {
         let path = dir.path().join("known_hosts");
         persist_known_hosts(&known_hosts, &path).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn test_connect_timeout_from_env() {
+        assert_eq!(connect_timeout_from_env(None), DEFAULT_CONNECT_TIMEOUT);
+        assert_eq!(
+            connect_timeout_from_env(Some("3".to_string())),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            connect_timeout_from_env(Some(" 25 ".to_string())),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            connect_timeout_from_env(Some("0".to_string())),
+            DEFAULT_CONNECT_TIMEOUT
+        );
+        assert_eq!(
+            connect_timeout_from_env(Some("soon".to_string())),
+            DEFAULT_CONNECT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_duration_to_ms_saturates() {
+        assert_eq!(duration_to_ms(Duration::from_secs(30)), 30_000);
+        assert_eq!(duration_to_ms(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn test_connect_any_succeeds_on_listening_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(connect_any(&[addr], Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn test_connect_any_fails_on_closed_port_and_empty_list() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(connect_any(&[addr], Duration::from_secs(2)).is_err());
+        assert!(connect_any(&[], Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn test_ensure_can_prompt_fails_fast_without_terminal() {
+        assert!(ensure_can_prompt(true, "A passphrase").is_ok());
+        let err = ensure_can_prompt(false, "A passphrase for ~/.ssh/id_ed25519")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no interactive terminal"), "{}", err);
+        assert!(err.contains("id_ed25519"), "{}", err);
     }
 
     #[test]

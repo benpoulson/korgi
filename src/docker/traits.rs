@@ -32,3 +32,19 @@ pub trait DockerHostApi: Send + Sync {
 
     async fn ensure_network(&self, name: &str) -> Result<()>;
 }
+
+/// Running commands inside containers (used to write Traefik's dynamic config).
+///
+/// Kept separate from [`DockerHostApi`] so the orchestrator can be tested with the
+/// mock host. `exec_in_container` must return `Err` when the command exits non-zero.
+#[async_trait]
+pub trait DockerExecApi: DockerHostApi {
+    async fn exec_in_container(&self, container: &str, cmd: &[&str]) -> Result<String>;
+}
+
+#[async_trait]
+impl DockerExecApi for super::host::DockerHost {
+    async fn exec_in_container(&self, container: &str, cmd: &[&str]) -> Result<String> {
+        super::host::DockerHost::exec_in_container(self, container, cmd).await
+    }
+}

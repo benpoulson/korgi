@@ -4,6 +4,7 @@ use bollard::models::{
 use std::collections::HashMap;
 
 use super::labels;
+use crate::config::duration::parse_duration_ns;
 use crate::config::types::ServiceConfig;
 
 /// Represents a running or stopped korgi-managed container.
@@ -19,6 +20,13 @@ pub struct KorgiContainer {
     pub state: String,
     pub status: String,
     pub health: Option<String>,
+    /// Host port the container is published on (what Traefik and HTTP health
+    /// checks must use). Comes from the `korgi.host_port` label, or for containers
+    /// created by older korgi versions from Docker's port bindings.
+    pub host_port: Option<u16>,
+    /// True when `host_port` is authoritative (label present or recovered from
+    /// Docker). False for legacy containers whose bindings have not been inspected.
+    pub host_port_known: bool,
 }
 
 impl KorgiContainer {
@@ -47,6 +55,14 @@ impl KorgiContainer {
 
         let status_str = summary.status.clone().unwrap_or_default();
 
+        let (host_port, host_port_known) = match labels::parse_host_port(container_labels) {
+            Some(recorded) => (recorded, true),
+            None => match summary_host_port(summary) {
+                Some(port) => (Some(port), true),
+                None => (None, false),
+            },
+        };
+
         Some(Self {
             id: summary.id.clone().unwrap_or_default(),
             name,
@@ -58,8 +74,38 @@ impl KorgiContainer {
             state: state_str,
             status: status_str.clone(),
             health: extract_health_from_status(Some(&status_str)),
+            host_port,
+            host_port_known,
         })
     }
+
+    pub fn is_running(&self) -> bool {
+        self.state == "running"
+    }
+}
+
+/// First published (public) port from a container summary. Only running
+/// containers report published ports here.
+fn summary_host_port(summary: &ContainerSummary) -> Option<u16> {
+    summary
+        .ports
+        .as_ref()?
+        .iter()
+        .filter_map(|p| p.public_port)
+        .find(|p| *p != 0)
+}
+
+/// Host port from a container's configured port bindings (`HostConfig.PortBindings`).
+/// Unlike the summary, this is available for stopped containers too.
+pub fn host_port_from_bindings(host_config: Option<&HostConfig>) -> Option<u16> {
+    let bindings = host_config?.port_bindings.as_ref()?;
+    let mut keys: Vec<&String> = bindings.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .filter_map(|k| bindings.get(k).cloned().flatten())
+        .flatten()
+        .filter_map(|b| b.host_port.and_then(|p| p.trim().parse::<u16>().ok()))
+        .find(|p| *p != 0)
 }
 
 /// Extract health status from the docker status string (e.g., "Up 5 minutes (healthy)").
@@ -77,6 +123,10 @@ fn extract_health_from_status(status: Option<&str>) -> Option<String> {
 }
 
 /// Build a Docker container config from a korgi service config.
+///
+/// `host_port` is the exact host port to publish `ports.container` on. It is also
+/// recorded in the `korgi.host_port` label so routing and health checks use the
+/// port the container actually bound.
 #[allow(clippy::too_many_arguments)]
 pub fn build_container_config(
     project: &str,
@@ -86,37 +136,48 @@ pub fn build_container_config(
     traefik_network: &str,
     resolved_env: &HashMap<String, String>,
     host_bind_ip: Option<&str>,
-    port_gen_offset: Option<u16>,
-) -> ContainerCreateBody {
-    let container_labels = labels::all_labels(project, svc, generation, instance, traefik_network);
+    host_port: Option<u16>,
+) -> anyhow::Result<ContainerCreateBody> {
+    let container_labels = labels::all_labels(
+        project,
+        svc,
+        generation,
+        instance,
+        traefik_network,
+        host_port,
+    );
 
     let env: Vec<String> = resolved_env
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
-    // Only set Docker HEALTHCHECK for mode=docker. Mode=http is checked by korgi externally.
-    let healthcheck = svc.health.as_ref().and_then(|h| {
-        use crate::config::types::HealthMode;
-        if h.mode == HealthMode::Http {
-            return None;
+    // Only inject a Docker HEALTHCHECK for mode=docker. Mode=http is checked by
+    // korgi externally; mode=image keeps the image's own HEALTHCHECK.
+    let healthcheck = match svc.health.as_ref() {
+        Some(h) if h.mode == crate::config::types::HealthMode::Docker => {
+            let port = svc.ports.as_ref().map(|p| p.container).unwrap_or(80);
+            Some(bollard::models::HealthConfig {
+                test: Some(vec![
+                    "CMD-SHELL".to_string(),
+                    format!(
+                        "(curl -sf http://localhost:{}{} > /dev/null) || (wget -q --spider http://localhost:{}{}) || exit 1",
+                        port, h.path, port, h.path
+                    ),
+                ]),
+                interval: Some(parse_duration_ns(&h.interval)?),
+                timeout: Some(parse_duration_ns(&h.timeout)?),
+                retries: Some(h.retries as i64),
+                start_period: h
+                    .start_period
+                    .as_ref()
+                    .map(|sp| parse_duration_ns(sp))
+                    .transpose()?,
+                start_interval: None,
+            })
         }
-        let port = svc.ports.as_ref().map(|p| p.container).unwrap_or(80);
-        Some(bollard::models::HealthConfig {
-            test: Some(vec![
-                "CMD-SHELL".to_string(),
-                format!(
-                    "(curl -sf http://localhost:{}{} > /dev/null) || (wget -q --spider http://localhost:{}{}) || exit 1",
-                    port, h.path, port, h.path
-                ),
-            ]),
-            interval: Some(parse_duration_ns(&h.interval)),
-            timeout: Some(parse_duration_ns(&h.timeout)),
-            retries: Some(h.retries as i64),
-            start_period: h.start_period.as_ref().map(|sp| parse_duration_ns(sp)),
-            start_interval: None,
-        })
-    });
+        _ => None,
+    };
 
     let mut binds = Vec::new();
     for vol in &svc.volumes {
@@ -150,17 +211,9 @@ pub fn build_container_config(
         .and_then(|r| r.cpus.as_ref())
         .map(|c| parse_nano_cpus(c));
 
-    // Build port bindings if host_base or host port is configured.
-    let port_bindings = svc.ports.as_ref().and_then(|ports| {
-        let host_port = if let Some(base) = ports.host_base {
-            let offset = port_gen_offset
-                .unwrap_or((generation.saturating_sub(1) as u16) * svc.replicas as u16);
-            Some(base + offset + instance as u16)
-        } else {
-            ports.host
-        };
-
-        host_port.map(|hp| {
+    // Publish the container port on the allocated host port, if any.
+    let port_bindings = match (svc.ports.as_ref(), host_port) {
+        (Some(ports), Some(hp)) => {
             let bind_ip = host_bind_ip.unwrap_or("0.0.0.0").to_string();
             let mut bindings = HashMap::new();
             bindings.insert(
@@ -170,9 +223,10 @@ pub fn build_container_config(
                     host_port: Some(hp.to_string()),
                 }]),
             );
-            bindings
-        })
-    });
+            Some(bindings)
+        }
+        _ => None,
+    };
 
     let host_config = HostConfig {
         binds: if binds.is_empty() { None } else { Some(binds) },
@@ -184,7 +238,7 @@ pub fn build_container_config(
         ..Default::default()
     };
 
-    ContainerCreateBody {
+    Ok(ContainerCreateBody {
         image: Some(svc.image.clone()),
         labels: Some(container_labels),
         env: if env.is_empty() { None } else { Some(env) },
@@ -193,19 +247,7 @@ pub fn build_container_config(
         healthcheck,
         host_config: Some(host_config),
         ..Default::default()
-    }
-}
-
-/// Parse a duration string like "5s", "30s", "1m" into nanoseconds.
-fn parse_duration_ns(s: &str) -> i64 {
-    let s = s.trim();
-    if let Some(secs) = s.strip_suffix('s') {
-        secs.parse::<i64>().unwrap_or(5) * 1_000_000_000
-    } else if let Some(mins) = s.strip_suffix('m') {
-        mins.parse::<i64>().unwrap_or(1) * 60 * 1_000_000_000
-    } else {
-        s.parse::<i64>().unwrap_or(5) * 1_000_000_000
-    }
+    })
 }
 
 /// Parse a memory string like "512m", "1g" into bytes.
@@ -237,20 +279,15 @@ mod tests {
     // --- Parse helpers ---
 
     #[test]
-    fn test_parse_duration_ns() {
-        assert_eq!(parse_duration_ns("5s"), 5_000_000_000);
-        assert_eq!(parse_duration_ns("1m"), 60_000_000_000);
-        assert_eq!(parse_duration_ns("30s"), 30_000_000_000);
-    }
-
-    #[test]
-    fn test_parse_duration_ns_edge_cases() {
-        assert_eq!(parse_duration_ns("0s"), 0);
-        assert_eq!(parse_duration_ns("2m"), 120_000_000_000);
-        // Bare number treated as seconds
-        assert_eq!(parse_duration_ns("10"), 10_000_000_000);
-        // With whitespace
-        assert_eq!(parse_duration_ns(" 5s "), 5_000_000_000);
+    fn test_parse_duration_ns_strict() {
+        assert_eq!(parse_duration_ns("5s").unwrap(), 5_000_000_000);
+        assert_eq!(parse_duration_ns("1m").unwrap(), 60_000_000_000);
+        assert_eq!(parse_duration_ns("500ms").unwrap(), 500_000_000);
+        assert_eq!(parse_duration_ns("1m30s").unwrap(), 90_000_000_000);
+        assert_eq!(parse_duration_ns("1h").unwrap(), 3_600_000_000_000);
+        assert_eq!(parse_duration_ns(" 5s ").unwrap(), 5_000_000_000);
+        // Bare numbers used to be read as seconds; they are now rejected.
+        assert!(parse_duration_ns("10").is_err());
     }
 
     #[test]
@@ -323,8 +360,8 @@ mod tests {
             names: Some(vec!["/korgi-myapp-api-g3-0".to_string()]),
             image: Some("myapp/api:v1".to_string()),
             labels: Some(labels),
-            state: state,
-            status: status,
+            state,
+            status,
             ..Default::default()
         }
     }
@@ -419,7 +456,8 @@ mod tests {
     fn test_build_container_config_minimal() {
         let svc = ServiceConfig::test_service("api", "myapp/api:v1");
         let env = HashMap::new();
-        let config = build_container_config("myapp", &svc, 1, 0, "korgi-traefik", &env, None, None);
+        let config =
+            build_container_config("myapp", &svc, 1, 0, "korgi-traefik", &env, None, None).unwrap();
 
         assert_eq!(config.image, Some("myapp/api:v1".to_string()));
         assert!(config.healthcheck.is_none()); // no health config
@@ -454,7 +492,8 @@ mod tests {
             start_period: Some("15s".to_string()),
         });
 
-        let config = build_container_config("proj", &svc, 2, 0, "net", &HashMap::new(), None, None);
+        let config =
+            build_container_config("proj", &svc, 2, 0, "net", &HashMap::new(), None, None).unwrap();
         let hc = config.healthcheck.unwrap();
         let test = hc.test.unwrap();
         assert_eq!(test[0], "CMD-SHELL");
@@ -475,7 +514,7 @@ mod tests {
         );
         env.insert("REDIS_URL".to_string(), "redis://localhost".to_string());
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &env, None, None);
+        let config = build_container_config("proj", &svc, 1, 0, "net", &env, None, None).unwrap();
         let env_vars = config.env.unwrap();
         assert_eq!(env_vars.len(), 2);
         assert!(env_vars.contains(&"DATABASE_URL=postgres://localhost/db".to_string()));
@@ -498,7 +537,8 @@ mod tests {
             },
         ];
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
+        let config =
+            build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None).unwrap();
         let binds = config.host_config.unwrap().binds.unwrap();
         assert_eq!(binds.len(), 2);
         assert!(binds.contains(&"/data:/app/data".to_string()));
@@ -513,7 +553,8 @@ mod tests {
             cpus: Some("0.5".to_string()),
         });
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
+        let config =
+            build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None).unwrap();
         let hc = config.host_config.unwrap();
         assert_eq!(hc.memory, Some(268435456)); // 256 * 1024 * 1024
         assert_eq!(hc.nano_cpus, Some(500_000_000));
@@ -531,7 +572,8 @@ mod tests {
             let mut svc = ServiceConfig::test_service("api", "api:v1");
             svc.restart = policy_str.to_string();
             let config =
-                build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
+                build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None)
+                    .unwrap();
             let restart = config.host_config.unwrap().restart_policy.unwrap();
             assert_eq!(
                 restart.name,
@@ -552,7 +594,8 @@ mod tests {
         ]);
         svc.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
 
-        let config = build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None);
+        let config =
+            build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None).unwrap();
         assert_eq!(config.cmd.unwrap(), vec!["serve", "--port", "8080"]);
         assert_eq!(config.entrypoint.unwrap(), vec!["/bin/sh", "-c"]);
     }
@@ -582,7 +625,8 @@ mod tests {
             &HashMap::new(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let labels = config.labels.unwrap();
         assert_eq!(labels.get("traefik.enable").unwrap(), "true");
         assert_eq!(
@@ -590,5 +634,113 @@ mod tests {
             "Host(`api.example.com`)"
         );
         assert_eq!(labels.get("korgi.generation").unwrap(), "5");
+    }
+
+    #[test]
+    fn test_build_container_config_binds_and_records_given_host_port() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.replicas = 2;
+        svc.ports = Some(PortsConfig {
+            container: 8080,
+            host: None,
+            host_base: Some(9001),
+        });
+        // Port shifted away from base + (gen-1)*replicas + instance by the allocator.
+        let config = build_container_config(
+            "myapp",
+            &svc,
+            3,
+            1,
+            "net",
+            &HashMap::new(),
+            Some("10.0.0.1"),
+            Some(9042),
+        )
+        .unwrap();
+        let bindings = config
+            .host_config
+            .as_ref()
+            .unwrap()
+            .port_bindings
+            .clone()
+            .unwrap();
+        let binding = bindings.get("8080/tcp").unwrap().as_ref().unwrap()[0].clone();
+        assert_eq!(binding.host_port.as_deref(), Some("9042"));
+        assert_eq!(binding.host_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            config.labels.unwrap().get("korgi.host_port").unwrap(),
+            "9042"
+        );
+        assert_eq!(
+            host_port_from_bindings(config.host_config.as_ref()),
+            Some(9042)
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_image_mode_keeps_image_healthcheck() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.health = Some(HealthConfig {
+            mode: HealthMode::Image,
+            path: String::new(),
+            interval: "5s".to_string(),
+            timeout: "3s".to_string(),
+            retries: 3,
+            start_period: None,
+        });
+        let config =
+            build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None).unwrap();
+        assert!(config.healthcheck.is_none());
+    }
+
+    #[test]
+    fn test_build_container_config_rejects_bad_duration() {
+        let mut svc = ServiceConfig::test_service("api", "api:v1");
+        svc.health = Some(HealthConfig {
+            mode: HealthMode::Docker,
+            path: "/health".to_string(),
+            interval: "5".to_string(),
+            timeout: "3s".to_string(),
+            retries: 3,
+            start_period: None,
+        });
+        assert!(
+            build_container_config("proj", &svc, 1, 0, "net", &HashMap::new(), None, None).is_err()
+        );
+    }
+
+    #[test]
+    fn test_from_summary_host_port_label_and_legacy_fallback() {
+        let mut labels = valid_labels();
+        labels.insert("korgi.host_port".to_string(), "9123".to_string());
+        let summary = make_summary(labels, Some(ContainerSummaryStateEnum::EXITED), None);
+        let c = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(c.host_port, Some(9123));
+        assert!(c.host_port_known);
+
+        // Legacy running container: no label, published port from the summary.
+        let mut summary = make_summary(
+            valid_labels(),
+            Some(ContainerSummaryStateEnum::RUNNING),
+            None,
+        );
+        summary.ports = Some(vec![bollard::models::PortSummary {
+            private_port: 8080,
+            public_port: Some(9005),
+            ..Default::default()
+        }]);
+        let c = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(c.host_port, Some(9005));
+        assert!(c.host_port_known);
+
+        // Legacy stopped container: unknown until inspected.
+        let summary = make_summary(
+            valid_labels(),
+            Some(ContainerSummaryStateEnum::EXITED),
+            None,
+        );
+        let c = KorgiContainer::from_summary(&summary, "web1").unwrap();
+        assert_eq!(c.host_port, None);
+        assert!(!c.host_port_known);
     }
 }

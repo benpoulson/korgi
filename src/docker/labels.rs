@@ -4,6 +4,13 @@ use crate::config::types::ServiceConfig;
 
 const LABEL_PREFIX: &str = "korgi";
 
+/// Label recording the host port a container was published on.
+///
+/// The value is the port number, or an empty string when the container has no
+/// published host port. Containers created by older korgi versions lack the label
+/// entirely; their port is recovered from Docker's port bindings instead.
+pub const HOST_PORT_LABEL: &str = "korgi.host_port";
+
 /// Generate korgi metadata labels for a container.
 pub fn metadata_labels(
     project: &str,
@@ -11,6 +18,7 @@ pub fn metadata_labels(
     generation: u64,
     instance: u32,
     image: &str,
+    host_port: Option<u16>,
 ) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     labels.insert(format!("{}.project", LABEL_PREFIX), project.to_string());
@@ -21,6 +29,10 @@ pub fn metadata_labels(
     );
     labels.insert(format!("{}.instance", LABEL_PREFIX), instance.to_string());
     labels.insert(format!("{}.image", LABEL_PREFIX), image.to_string());
+    labels.insert(
+        HOST_PORT_LABEL.to_string(),
+        host_port.map(|p| p.to_string()).unwrap_or_default(),
+    );
     labels
 }
 
@@ -73,8 +85,8 @@ pub fn traefik_labels(
             ports.container.to_string(),
         );
 
-        // Add Traefik-side health check labels if the service has health config
-        if let Some(health) = &svc_config.health {
+        // Add Traefik-side health check labels if the service has an HTTP health path
+        if let Some(health) = svc_config.health.as_ref().filter(|h| !h.path.is_empty()) {
             labels.insert(
                 format!(
                     "traefik.http.services.{}.loadbalancer.healthcheck.path",
@@ -175,6 +187,7 @@ pub fn all_labels(
     generation: u64,
     instance: u32,
     traefik_network: &str,
+    host_port: Option<u16>,
 ) -> HashMap<String, String> {
     let mut labels = metadata_labels(
         project,
@@ -182,6 +195,7 @@ pub fn all_labels(
         generation,
         instance,
         &svc_config.image,
+        host_port,
     );
 
     let traefik = traefik_labels(project, &svc_config.name, svc_config, traefik_network);
@@ -255,6 +269,22 @@ pub fn parse_service(labels: &HashMap<String, String>) -> Option<String> {
     labels.get(&format!("{}.service", LABEL_PREFIX)).cloned()
 }
 
+/// Parse the recorded host port from a container's labels.
+///
+/// Returns `None` when the label is absent (container created by an older korgi),
+/// `Some(None)` when the container was recorded as having no host port, and
+/// `Some(Some(port))` otherwise.
+pub fn parse_host_port(labels: &HashMap<String, String>) -> Option<Option<u16>> {
+    let value = labels.get(HOST_PORT_LABEL)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(None);
+    }
+    // An unparsable value is treated like a missing label so the caller falls back
+    // to Docker's port bindings.
+    value.parse::<u16>().ok().map(Some)
+}
+
 /// Parse image from a container's labels.
 pub fn parse_image(labels: &HashMap<String, String>) -> Option<String> {
     labels.get(&format!("{}.image", LABEL_PREFIX)).cloned()
@@ -272,12 +302,33 @@ mod tests {
 
     #[test]
     fn test_metadata_labels() {
-        let labels = metadata_labels("myapp", "api", 4, 1, "myapp/api:v2");
+        let labels = metadata_labels("myapp", "api", 4, 1, "myapp/api:v2", Some(9005));
         assert_eq!(labels.get("korgi.project").unwrap(), "myapp");
         assert_eq!(labels.get("korgi.service").unwrap(), "api");
         assert_eq!(labels.get("korgi.generation").unwrap(), "4");
         assert_eq!(labels.get("korgi.instance").unwrap(), "1");
         assert_eq!(labels.get("korgi.image").unwrap(), "myapp/api:v2");
+        assert_eq!(labels.get("korgi.host_port").unwrap(), "9005");
+    }
+
+    #[test]
+    fn test_parse_host_port() {
+        let mut labels = HashMap::new();
+        assert_eq!(parse_host_port(&labels), None, "legacy: label absent");
+        labels.insert(HOST_PORT_LABEL.to_string(), "".to_string());
+        assert_eq!(
+            parse_host_port(&labels),
+            Some(None),
+            "recorded: no host port"
+        );
+        labels.insert(HOST_PORT_LABEL.to_string(), "9007".to_string());
+        assert_eq!(parse_host_port(&labels), Some(Some(9007)));
+        labels.insert(HOST_PORT_LABEL.to_string(), "garbage".to_string());
+        assert_eq!(
+            parse_host_port(&labels),
+            None,
+            "garbage falls back to bindings"
+        );
     }
 
     #[test]
@@ -474,7 +525,7 @@ mod tests {
             deploy: None,
         };
 
-        let labels = all_labels("proj", &svc, 7, 2, "my-net");
+        let labels = all_labels("proj", &svc, 7, 2, "my-net", None);
         // Should have both metadata and traefik labels
         assert_eq!(labels.get("korgi.project").unwrap(), "proj");
         assert_eq!(labels.get("korgi.service").unwrap(), "api");
@@ -510,12 +561,13 @@ mod tests {
             deploy: None,
         };
 
-        let labels = all_labels("proj", &svc, 1, 0, "net");
+        let labels = all_labels("proj", &svc, 1, 0, "net", None);
         // Should have metadata but no traefik labels
         assert_eq!(labels.get("korgi.project").unwrap(), "proj");
-        assert!(labels.get("traefik.enable").is_none());
-        // Exactly 5 metadata labels
-        assert_eq!(labels.len(), 5);
+        assert!(!labels.contains_key("traefik.enable"));
+        // Exactly 6 metadata labels (host_port recorded as empty)
+        assert_eq!(labels.len(), 6);
+        assert_eq!(labels.get(HOST_PORT_LABEL).unwrap(), "");
     }
 
     #[test]
@@ -620,11 +672,7 @@ mod tests {
         };
 
         let labels = traefik_labels("proj", "api", &svc, "net");
-        assert!(
-            labels
-                .get("traefik.http.services.proj-api.loadbalancer.server.port")
-                .is_none()
-        );
+        assert!(!labels.contains_key("traefik.http.services.proj-api.loadbalancer.server.port"));
     }
 
     #[test]
@@ -723,15 +771,9 @@ mod tests {
 
         let labels = traefik_labels("proj", "api", &svc, "net");
         // Should have port but no health check labels
+        assert!(labels.contains_key("traefik.http.services.proj-api.loadbalancer.server.port"));
         assert!(
-            labels
-                .get("traefik.http.services.proj-api.loadbalancer.server.port")
-                .is_some()
-        );
-        assert!(
-            labels
-                .get("traefik.http.services.proj-api.loadbalancer.healthcheck.path")
-                .is_none()
+            !labels.contains_key("traefik.http.services.proj-api.loadbalancer.healthcheck.path")
         );
     }
 
@@ -895,15 +937,7 @@ mod tests {
         };
 
         let labels = traefik_labels("proj", "api", &svc, "net");
-        assert!(
-            labels
-                .get("traefik.http.services.proj-api.loadbalancer.sticky.cookie")
-                .is_none()
-        );
-        assert!(
-            labels
-                .get("traefik.http.services.proj-api.loadbalancer.strategy")
-                .is_none()
-        );
+        assert!(!labels.contains_key("traefik.http.services.proj-api.loadbalancer.sticky.cookie"));
+        assert!(!labels.contains_key("traefik.http.services.proj-api.loadbalancer.strategy"));
     }
 }

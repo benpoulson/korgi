@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
 use crate::cli::output;
@@ -7,12 +7,20 @@ use crate::config::interpolate;
 use crate::config::types::Config;
 use crate::docker::containers;
 use crate::docker::labels;
-use crate::docker::traits::DockerHostApi;
+use crate::docker::traits::DockerExecApi;
 use crate::orchestrator::placement;
+use crate::orchestrator::ports;
 use crate::orchestrator::state::LiveState;
+use crate::orchestrator::traefik_sync::{sync_traefik_config, sync_traefik_config_excluding};
+use crate::orchestrator::verify::{self, ContainerRef, CreatedContainers};
 
-/// Scale a service to a target replica count.
-pub async fn scale_service<D: DockerHostApi>(
+/// Scale a service's current (running) generation to a target replica count.
+///
+/// Scale-up creates containers with the generation's own image (its
+/// `korgi.image` label), on freshly allocated host ports, health-checks them and
+/// only then adds them to Traefik. Scale-down removes containers from Traefik
+/// first and stops them afterwards.
+pub async fn scale_service<D: DockerExecApi>(
     config: &Config,
     service: &str,
     target_count: u32,
@@ -35,10 +43,11 @@ pub async fn scale_service<D: DockerHostApi>(
         .current_generation(service)
         .context(format!("No running containers for service '{}'", service))?;
 
-    let running = state
-        .generation_containers(service, current_gen)
-        .into_iter()
-        .filter(|c| c.state == "running")
+    let generation_containers = state.generation_containers(service, current_gen);
+    let running = generation_containers
+        .iter()
+        .copied()
+        .filter(|c| c.is_running())
         .collect::<Vec<_>>();
 
     let current_count = running.len() as u32;
@@ -57,67 +66,149 @@ pub async fn scale_service<D: DockerHostApi>(
     ));
 
     if target_count > current_count {
-        // Scale UP: add new containers
-        let add_count = target_count - current_count;
+        // Scale UP: add containers to the running generation, using its image.
+        let mut svc_gen = svc.clone();
+        svc_gen.image = running[0].image.clone();
+
         let matching_hosts = config.matching_hosts(svc);
         let all_placements = placement::place_replicas(&matching_hosts.to_vec(), target_count);
+        let existing_instances: HashSet<u32> = running.iter().map(|c| c.instance).collect();
+        let new_placements: Vec<_> = all_placements
+            .into_iter()
+            .filter(|(_, instance)| !existing_instances.contains(instance))
+            .collect();
+        if new_placements.is_empty() {
+            anyhow::bail!("No free instance slots to scale '{}' up", service);
+        }
 
-        // We need to create containers for instances that don't exist yet
-        let existing_instances: Vec<u32> = running.iter().map(|c| c.instance).collect();
+        let mut new_hosts: Vec<&str> = new_placements
+            .iter()
+            .map(|(h, _)| h.name.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        new_hosts.sort_unstable();
+        for host_name in &new_hosts {
+            docker_hosts
+                .get(*host_name)
+                .context(format!("No connection to host {}", host_name))?;
+        }
+
+        let host_ports: Vec<Option<u16>> = match svc.ports.as_ref().and_then(|p| p.host_base) {
+            Some(base) => {
+                let used = ports::collect_used_ports_on(docker_hosts, &new_hosts).await?;
+                ports::find_free_ports(base, new_placements.len(), &used)?
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            }
+            None => vec![None; new_placements.len()],
+        };
 
         let sys_env = interpolate::system_env();
         let resolved_env = interpolate::interpolate_env(&svc.env, &sys_env)?;
 
-        let pb = output::spinner(&format!("Starting {} new containers...", add_count));
-        for (host, instance) in &all_placements {
-            if existing_instances.contains(instance) {
-                continue;
+        let created = CreatedContainers::new();
+        let pb = output::spinner(&format!(
+            "Starting {} new containers...",
+            new_placements.len()
+        ));
+        let started = async {
+            for host_name in &new_hosts {
+                let docker = &docker_hosts[*host_name];
+                verify::ensure_image(docker, config, &svc_gen.image).await?;
+                docker.ensure_network(traefik_network).await?;
             }
-            let docker = docker_hosts
-                .get(&host.name)
-                .context(format!("No connection to host {}", host.name))?;
+            for ((host, instance), host_port) in new_placements.iter().zip(&host_ports) {
+                let docker = &docker_hosts[host.name.as_str()];
+                let name =
+                    labels::container_name(&config.project.name, service, current_gen, *instance);
 
-            docker.ensure_network(traefik_network).await?;
+                // A stopped leftover with the same name would block the create.
+                if let Some(stale) = generation_containers
+                    .iter()
+                    .find(|c| c.instance == *instance && !c.is_running())
+                    && let Some(d) = docker_hosts.get(&stale.host_name)
+                {
+                    d.remove_container(&stale.id, true).await?;
+                }
 
-            let name =
-                labels::container_name(&config.project.name, service, current_gen, *instance);
+                let container_config = containers::build_container_config(
+                    &config.project.name,
+                    &svc_gen,
+                    current_gen,
+                    *instance,
+                    traefik_network,
+                    &resolved_env,
+                    Some(host.internal_addr()),
+                    *host_port,
+                )?;
 
-            let container_config = containers::build_container_config(
-                &config.project.name,
-                svc,
-                current_gen,
-                *instance,
-                traefik_network,
-                &resolved_env,
-                Some(host.internal_addr()),
-                None,
-            );
-
-            let id = docker.create_container(&name, container_config).await?;
-            docker.start_container(&id).await?;
-            debug!("Started {} on {}", name, host.name);
+                let id = docker
+                    .create_container(&name, container_config)
+                    .await
+                    .with_context(|| format!("Failed to create {} on {}", name, host.name))?;
+                created.push(ContainerRef {
+                    service: service.to_string(),
+                    host_name: host.name.clone(),
+                    id: id.clone(),
+                    name: name.clone(),
+                    host_port: *host_port,
+                });
+                docker
+                    .start_container(&id)
+                    .await
+                    .with_context(|| format!("Failed to start {} on {}", name, host.name))?;
+                debug!("Started {} on {}", name, host.name);
+            }
+            verify::verify_healthy(config, &svc_gen, &created.snapshot(), docker_hosts)
+                .await
+                .context("new containers failed their health check")
         }
+        .await;
         pb.finish_and_clear();
-        output::success(&format!("Added {} containers", add_count));
+
+        if let Err(e) = started {
+            verify::discard_created(docker_hosts, &created.take_all()).await;
+            return Err(e.context(format!("Scale-up of '{}' aborted", service)));
+        }
+        output::success(&format!(
+            "Added {} healthy containers",
+            new_placements.len()
+        ));
+
+        sync_traefik_config(config, docker_hosts)
+            .await
+            .context("Traefik sync after scale-up failed")?;
     } else {
-        // Scale DOWN: remove excess containers (highest instance numbers first)
-        let remove_count = current_count - target_count;
+        // Scale DOWN: take containers out of Traefik first, then stop them.
+        let remove_count = (current_count - target_count) as usize;
         let mut to_remove = running.clone();
         to_remove.sort_by_key(|c| std::cmp::Reverse(c.instance));
-        let to_remove = &to_remove[..remove_count as usize];
+        let to_remove: Vec<ContainerRef> = to_remove[..remove_count]
+            .iter()
+            .map(|c| ContainerRef::from(*c))
+            .collect();
+        let exclude: HashSet<String> = to_remove.iter().map(|c| c.id.clone()).collect();
+
+        sync_traefik_config_excluding(config, docker_hosts, &exclude)
+            .await
+            .context("Traefik sync failed; no containers were stopped")?;
 
         let deploy_cfg = Config::deploy_config(svc);
         let pb = output::spinner(&format!("Stopping {} containers...", remove_count));
-        for container in to_remove {
-            if let Some(docker) = docker_hosts.get(&container.host_name) {
-                docker
-                    .stop_container(&container.id, deploy_cfg.drain_seconds as i64)
-                    .await
-                    .ok();
-                docker.remove_container(&container.id, false).await.ok();
-            }
-        }
+        let stopped =
+            verify::stop_all(docker_hosts, &to_remove, deploy_cfg.drain_seconds as i64).await;
+        let removed = match &stopped {
+            Ok(()) => verify::remove_all(docker_hosts, &to_remove).await,
+            Err(_) => Ok(()),
+        };
         pb.finish_and_clear();
+
+        let final_sync = sync_traefik_config(config, docker_hosts).await;
+        stopped.context("Failed to stop containers")?;
+        removed.context("Failed to remove containers")?;
+        final_sync.context("Final Traefik sync after scale-down failed")?;
         output::success(&format!("Removed {} containers", remove_count));
     }
 
@@ -161,6 +252,7 @@ mod tests {
                 entrypoints: HashMap::new(),
                 network: "korgi-traefik".to_string(),
                 acme: None,
+                passthroughs: Vec::new(),
             }),
             services: vec![{
                 let mut svc = ServiceConfig::test_service("api", "myapp/api:v1");
@@ -349,5 +441,223 @@ mod tests {
             remove_count, 2,
             "Should remove all 2 containers when scaling to 0"
         );
+    }
+
+    fn traefik_config() -> Config {
+        let mut config = test_config();
+        config.hosts.push({
+            let mut h = HostConfig::test_host("lb", "10.0.0.100");
+            h.role = HostRole::Lb;
+            h
+        });
+        config.traefik.as_mut().unwrap().hosts = vec!["lb".to_string()];
+        let svc = &mut config.services[0];
+        // Config now points at v9, but the running generation was built from v1.
+        svc.image = "myapp/api:v9".to_string();
+        svc.routing = Some(RoutingConfig {
+            rule: "Host(`api.example.com`)".to_string(),
+            entrypoints: vec![],
+            tls: false,
+            lb_strategy: None,
+            sticky: None,
+        });
+        svc.ports = Some(PortsConfig {
+            container: 8080,
+            host: None,
+            host_base: Some(9001),
+        });
+        svc.deploy = Some(DeployConfig {
+            drain_seconds: 1,
+            start_delay: 0,
+            rollback_keep: 2,
+        });
+        config
+    }
+
+    fn labelled_hosts(log: &SharedLog) -> HashMap<String, MockDockerHost> {
+        let mut hosts = HashMap::new();
+        for (name, id, instance, port) in [("web1", "c0", 0, "9003"), ("web2", "c1", 1, "9004")] {
+            let h = MockDockerHost::new(name).with_shared_log(log);
+            h.add_container(with_label(
+                mock_container_summary(
+                    id,
+                    &format!("korgi-myapp-api-g2-{}", instance),
+                    "myapp",
+                    "api",
+                    2,
+                    instance,
+                    "myapp/api:v1",
+                    ContainerSummaryStateEnum::RUNNING,
+                    "Up",
+                ),
+                "korgi.host_port",
+                port,
+            ));
+            hosts.insert(name.to_string(), h);
+        }
+        hosts.insert(
+            "lb".to_string(),
+            MockDockerHost::new("lb").with_shared_log(log),
+        );
+        hosts
+    }
+
+    #[tokio::test]
+    async fn test_scale_up_uses_generation_image_free_ports_and_routes_after_health() {
+        let config = traefik_config();
+        let log = SharedLog::default();
+        let hosts = labelled_hosts(&log);
+
+        scale_service(&config, "api", 3, &hosts).await.unwrap();
+
+        let cfg = hosts["web1"]
+            .created_config("korgi-myapp-api-g2-2")
+            .unwrap();
+        assert_eq!(
+            cfg.image.as_deref(),
+            Some("myapp/api:v1"),
+            "generation's image, not config's"
+        );
+        let port = crate::docker::containers::host_port_from_bindings(cfg.host_config.as_ref());
+        assert_eq!(port, Some(9001), "first free port, not a recomputed one");
+        assert_eq!(cfg.labels.unwrap().get("korgi.host_port").unwrap(), "9001");
+
+        let entries = log.lock().unwrap().clone();
+        let started = entries
+            .iter()
+            .position(|(_, c)| matches!(c, DockerCall::StartContainer { .. }))
+            .unwrap();
+        let inspected = entries
+            .iter()
+            .rposition(|(h, c)| h == "web1" && matches!(c, DockerCall::InspectContainer { id } if id.starts_with("web1-container")))
+            .expect("new container health-checked");
+        let synced = entries
+            .iter()
+            .position(
+                |(_, c)| matches!(c, DockerCall::Exec { script, .. } if script.contains("mv -f")),
+            )
+            .unwrap();
+        assert!(started < inspected && inspected < synced);
+        let yaml = hosts["lb"]
+            .file("korgi-traefik", "/etc/korgi/dynamic.yml")
+            .unwrap();
+        assert!(yaml.contains("http://10.0.0.1:9001\""));
+        assert!(yaml.contains("http://10.0.0.1:9003\""));
+    }
+
+    #[tokio::test]
+    async fn test_scale_up_health_failure_removes_new_containers() {
+        let config = traefik_config();
+        let log = SharedLog::default();
+        let hosts = labelled_hosts(&log);
+        hosts["web1"].set_container_running(false);
+        assert!(scale_service(&config, "api", 3, &hosts).await.is_err());
+        assert!(
+            hosts["web1"]
+                .created_config("korgi-myapp-api-g2-2")
+                .is_some()
+        );
+        assert!(
+            hosts["web1"]
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, DockerCall::RemoveContainer { id, .. } if id.starts_with("web1-container")))
+        );
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|(_, c)| matches!(c, DockerCall::Exec { .. })),
+            "never routed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scale_down_syncs_before_stopping() {
+        let config = traefik_config();
+        let log = SharedLog::default();
+        let hosts = labelled_hosts(&log);
+
+        scale_service(&config, "api", 1, &hosts).await.unwrap();
+
+        let entries = log.lock().unwrap().clone();
+        let first_write = entries
+            .iter()
+            .position(
+                |(_, c)| matches!(c, DockerCall::Exec { script, .. } if script.contains("mv -f")),
+            )
+            .unwrap();
+        let stop = entries
+            .iter()
+            .position(|(_, c)| matches!(c, DockerCall::StopContainer { id, .. } if id == "c1"))
+            .unwrap();
+        assert!(first_write < stop, "Traefik updated before stopping");
+        // The config written before the stop already excluded c1 (port 9004).
+        let writes: Vec<_> = entries
+            .iter()
+            .filter(
+                |(_, c)| matches!(c, DockerCall::Exec { script, .. } if script.contains("mv -f")),
+            )
+            .collect();
+        assert_eq!(writes.len(), 2);
+        if let DockerCall::Exec { script, .. } = &writes[0].1 {
+            assert!(!script.contains("9004"));
+            assert!(script.contains("9003"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scale_down_sync_failure_stops_nothing() {
+        let config = traefik_config();
+        let log = SharedLog::default();
+        let hosts = labelled_hosts(&log);
+        hosts["lb"].set_exec_error("exit 1");
+        assert!(scale_service(&config, "api", 1, &hosts).await.is_err());
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|(_, c)| matches!(c, DockerCall::StopContainer { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scale_after_rollback_targets_running_generation() {
+        let config = test_config();
+        let mut hosts = HashMap::new();
+        let web1 = MockDockerHost::new("web1");
+        // gen 3 stopped (rolled back from), gen 2 running.
+        web1.add_container(mock_container_summary(
+            "g3",
+            "korgi-myapp-api-g3-0",
+            "myapp",
+            "api",
+            3,
+            0,
+            "myapp/api:v3",
+            ContainerSummaryStateEnum::EXITED,
+            "Exited",
+        ));
+        web1.add_container(mock_container_summary(
+            "g2",
+            "korgi-myapp-api-g2-0",
+            "myapp",
+            "api",
+            2,
+            0,
+            "myapp/api:v2",
+            ContainerSummaryStateEnum::RUNNING,
+            "Up",
+        ));
+        hosts.insert("web1".to_string(), web1);
+        hosts.insert("web2".to_string(), MockDockerHost::new("web2"));
+
+        scale_service(&config, "api", 2, &hosts).await.unwrap();
+        let created = hosts["web2"].created_config("korgi-myapp-api-g2-1");
+        assert!(
+            created.is_some(),
+            "scaled the running generation 2, not stopped gen 3"
+        );
+        assert_eq!(created.unwrap().image.as_deref(), Some("myapp/api:v2"));
     }
 }

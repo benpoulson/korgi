@@ -12,6 +12,50 @@ use crate::docker::host::DockerHost;
 
 const TRAEFIK_CONTAINER_NAME: &str = "korgi-traefik";
 
+/// A parsed Traefik entrypoint address such as `:80`, `0.0.0.0:443`,
+/// `[::]:8080` or `:443/udp`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EntrypointAddress {
+    pub host_ip: Option<String>,
+    pub port: u16,
+    pub protocol: String,
+}
+
+/// Parse a Traefik entrypoint address (`[host]:port[/tcp|/udp]`).
+pub fn parse_entrypoint_address(addr: &str) -> Result<EntrypointAddress> {
+    let addr = addr.trim();
+    let (hostport, protocol) = match addr.rsplit_once('/') {
+        Some((hp, proto)) => {
+            let proto = proto.to_ascii_lowercase();
+            if proto != "tcp" && proto != "udp" {
+                anyhow::bail!("unsupported protocol '{}' in '{}'", proto, addr);
+            }
+            (hp, proto)
+        }
+        None => (addr, "tcp".to_string()),
+    };
+    let (host, port_str) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => ("", hostport),
+    };
+    let port: u16 = port_str
+        .parse()
+        .ok()
+        .filter(|p| *p != 0)
+        .with_context(|| format!("invalid port '{}' in '{}'", port_str, addr))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host_ip = if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    };
+    Ok(EntrypointAddress {
+        host_ip,
+        port,
+        protocol,
+    })
+}
+
 pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>) -> Result<()> {
     let traefik = config
         .traefik
@@ -36,7 +80,9 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
         docker.ensure_network(&traefik.network).await?;
 
         // Pull image
-        docker.pull_image(&traefik.image, None).await?;
+        let auth =
+            crate::docker::registry::credentials_for_image(&traefik.image, &config.registries);
+        docker.pull_image(&traefik.image, auth).await?;
 
         // Remove existing traefik container if any
         let _ = docker.stop_container(TRAEFIK_CONTAINER_NAME, 10).await;
@@ -50,7 +96,15 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
         ];
 
         for (name, addr) in &traefik.entrypoints {
-            cmd.push(format!("--entrypoints.{}.address={}", name, addr));
+            let ep = parse_entrypoint_address(addr)
+                .with_context(|| format!("Invalid address for Traefik entrypoint '{}'", name))?;
+            // Inside the container Traefik listens on all interfaces; a host IP in
+            // the configured address only restricts the published port binding.
+            let suffix = if ep.protocol == "udp" { "/udp" } else { "" };
+            cmd.push(format!(
+                "--entrypoints.{}.address=:{}{}",
+                name, ep.port, suffix
+            ));
         }
 
         if let Some(acme) = &traefik.acme {
@@ -75,13 +129,14 @@ pub async fn deploy(config: &Config, docker_hosts: &HashMap<String, DockerHost>)
 
         // Port bindings
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-        for addr in traefik.entrypoints.values() {
-            let port = addr.trim_start_matches(':');
+        for (name, addr) in &traefik.entrypoints {
+            let ep = parse_entrypoint_address(addr)
+                .with_context(|| format!("Invalid address for Traefik entrypoint '{}'", name))?;
             port_bindings.insert(
-                format!("{}/tcp", port),
+                format!("{}/{}", ep.port, ep.protocol),
                 Some(vec![PortBinding {
-                    host_ip: Some("0.0.0.0".to_string()),
-                    host_port: Some(port.to_string()),
+                    host_ip: Some(ep.host_ip.clone().unwrap_or_else(|| "0.0.0.0".to_string())),
+                    host_port: Some(ep.port.to_string()),
                 }]),
             );
         }
@@ -190,4 +245,43 @@ pub async fn logs(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_entrypoint_address_forms() {
+        let ep = parse_entrypoint_address(":80").unwrap();
+        assert_eq!(
+            (ep.host_ip, ep.port, ep.protocol.as_str()),
+            (None, 80, "tcp")
+        );
+
+        let ep = parse_entrypoint_address("0.0.0.0:80").unwrap();
+        assert_eq!(ep.host_ip.as_deref(), Some("0.0.0.0"));
+        assert_eq!(ep.port, 80);
+
+        let ep = parse_entrypoint_address("10.0.0.1:443").unwrap();
+        assert_eq!(ep.host_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(ep.port, 443);
+
+        let ep = parse_entrypoint_address("[::]:8080").unwrap();
+        assert_eq!(ep.host_ip.as_deref(), Some("::"));
+        assert_eq!(ep.port, 8080);
+
+        let ep = parse_entrypoint_address(":443/udp").unwrap();
+        assert_eq!((ep.port, ep.protocol.as_str()), (443, "udp"));
+
+        let ep = parse_entrypoint_address("8000").unwrap();
+        assert_eq!((ep.host_ip, ep.port), (None, 8000));
+    }
+
+    #[test]
+    fn test_parse_entrypoint_address_rejects_garbage() {
+        for bad in ["", ":", ":http", "0.0.0.0:99999", ":0", ":80/sctp"] {
+            assert!(parse_entrypoint_address(bad).is_err(), "{}", bad);
+        }
+    }
 }

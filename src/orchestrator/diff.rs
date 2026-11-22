@@ -9,6 +9,7 @@ use crate::config::types::{Config, HostConfig, ServiceConfig};
 use crate::docker::containers::{self, KorgiContainer};
 use crate::docker::traits::DockerHostApi;
 use crate::orchestrator::placement;
+use crate::orchestrator::ports;
 use crate::orchestrator::state::LiveState;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -269,9 +270,14 @@ async fn normalize_desired_instances<D: DockerHostApi>(
 
     let port_offset =
         compute_port_offset(svc, planned_generation, placements, docker_hosts).await?;
+    let base = svc.ports.as_ref().and_then(|p| p.host_base);
 
     let mut instances = Vec::new();
     for (host, instance) in placements {
+        let host_port = match (base, port_offset) {
+            (Some(base), Some(offset)) => Some(ports::block_port(base, offset, *instance)?),
+            _ => None,
+        };
         let config = containers::build_container_config(
             &config.project.name,
             &svc_for_desired,
@@ -280,8 +286,8 @@ async fn normalize_desired_instances<D: DockerHostApi>(
             traefik_network,
             &resolved_env,
             Some(host.internal_addr()),
-            port_offset,
-        );
+            host_port,
+        )?;
         instances.push(normalize_desired_instance(svc, host, *instance, config));
     }
     instances.sort_by_key(|instance| instance.instance);
@@ -304,30 +310,12 @@ async fn compute_port_offset<D: DockerHostApi>(
     let unique_hosts = placements
         .iter()
         .map(|(host, _)| host.name.as_str())
-        .collect::<HashSet<_>>();
-    let mut used_ports = HashSet::new();
-    for host_name in unique_hosts {
-        let docker = docker_hosts
-            .get(host_name)
-            .context(format!("No Docker connection for host {}", host_name))?;
-        let all_containers = docker.list_containers(HashMap::new(), false).await?;
-        for container in all_containers {
-            if let Some(container_ports) = container.ports {
-                for port in container_ports {
-                    if let Some(public_port) = port.public_port {
-                        used_ports.insert(public_port);
-                    }
-                }
-            }
-        }
-    }
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let used_ports = ports::collect_used_ports_on(docker_hosts, &unique_hosts).await?;
 
-    let offset = crate::orchestrator::deploy::find_free_port_offset(
-        base,
-        svc.replicas,
-        planned_generation,
-        &used_ports,
-    )?;
+    let offset = ports::find_free_port_offset(base, svc.replicas, planned_generation, &used_ports)?;
     Ok(Some(offset))
 }
 
@@ -341,6 +329,9 @@ fn normalize_desired_instance(
     let env = normalize_env(config.env.unwrap_or_default());
     let mut labels = normalize_labels(config.labels.unwrap_or_default());
     labels.remove("korgi.generation");
+    // The allocated host port differs per generation by design; it is compared
+    // through the ports field, not as a label.
+    labels.remove(crate::docker::labels::HOST_PORT_LABEL);
 
     let ports = normalize_desired_ports(svc, host, instance, &host_config);
 
@@ -391,6 +382,9 @@ fn normalize_live_instance(
     let config = inspect.config.unwrap_or_default();
     let mut labels = normalize_labels(config.labels.unwrap_or_default());
     labels.remove("korgi.generation");
+    // The allocated host port differs per generation by design; it is compared
+    // through the ports field, not as a label.
+    labels.remove(crate::docker::labels::HOST_PORT_LABEL);
 
     NormalizedInstanceSpec {
         instance: container.instance,
@@ -411,6 +405,7 @@ fn normalize_live_instance(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_field_changes(
     svc: &ServiceConfig,
     image: &str,
@@ -622,7 +617,9 @@ fn normalize_desired_ports(
                     .unwrap_or_else(|| host.internal_addr().to_string()),
                 container_port: ports.container,
                 host_port: ports.host,
-                host_base: ports.host_base.map(|base| base + instance as u16),
+                host_base: ports
+                    .host_base
+                    .and_then(|base| base.checked_add(u16::try_from(instance).ok()?)),
             });
         }
     }
@@ -633,7 +630,9 @@ fn normalize_desired_ports(
             bind_ip: host.internal_addr().to_string(),
             container_port: ports.container,
             host_port: ports.host,
-            host_base: ports.host_base.map(|base| base + instance as u16),
+            host_base: ports
+                .host_base
+                .and_then(|base| base.checked_add(u16::try_from(instance).ok()?)),
         });
     }
     normalized
@@ -664,7 +663,9 @@ fn normalize_live_ports(
                 bind_ip: value.host_ip.unwrap_or_else(|| "0.0.0.0".to_string()),
                 container_port: ports.container,
                 host_port: ports.host,
-                host_base: ports.host_base.map(|base| base + container.instance as u16),
+                host_base: ports
+                    .host_base
+                    .and_then(|base| base.checked_add(u16::try_from(container.instance).ok()?)),
             });
         }
     }
@@ -675,7 +676,9 @@ fn normalize_live_ports(
             bind_ip: "0.0.0.0".to_string(),
             container_port: ports.container,
             host_port: ports.host,
-            host_base: ports.host_base.map(|base| base + container.instance as u16),
+            host_base: ports
+                .host_base
+                .and_then(|base| base.checked_add(u16::try_from(container.instance).ok()?)),
         });
     }
     normalized
@@ -717,6 +720,7 @@ mod tests {
                 entrypoints: HashMap::new(),
                 network: "korgi-traefik".to_string(),
                 acme: None,
+                passthroughs: Vec::new(),
             }),
             services: vec![{
                 let mut svc = ServiceConfig::test_service("api", "myapp/api:v1");
