@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 use crate::orchestrator::rollback::rollback_service;
@@ -17,7 +16,6 @@ pub async fn run(
         output::info("Cancelled");
         return Ok(());
     }
-    rollback_service(config, service, docker_hosts).await?;
-    sync_config::sync_traefik_config(config, docker_hosts).await?;
-    Ok(())
+    // Health checks and Traefik syncs are ordered inside rollback_service.
+    rollback_service(config, service, docker_hosts).await
 }

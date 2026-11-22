@@ -1,11 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cli::output;
 use crate::commands::sync_config;
 use crate::config::types::Config;
 use crate::docker::host::DockerHost;
 use crate::orchestrator::state::LiveState;
+use crate::orchestrator::verify::{self, ContainerRef};
 
 pub async fn run(
     config: &Config,
@@ -38,22 +39,47 @@ pub async fn run(
         return Ok(());
     }
 
-    let pb = output::progress_bar(containers.len() as u64, "Destroying containers");
-    for container in &containers {
-        if let Some(docker) = docker_hosts.get(&container.host_name) {
-            if container.state == "running" {
-                docker.stop_container(&container.id, 10).await.ok();
-            }
-            docker.remove_container(&container.id, true).await.ok();
-        }
-        pb.inc(1);
+    // Take the containers out of Traefik before stopping them, so no request is
+    // routed to a backend that is going away. Destroy proceeds even if this fails
+    // (e.g. Traefik itself is gone), but says so.
+    let ids: HashSet<String> = containers.iter().map(|c| c.id.clone()).collect();
+    if let Err(e) = sync_config::sync_traefik_config_excluding(config, docker_hosts, &ids).await {
+        output::warn(&format!(
+            "Could not update Traefik before destroying ({:#}); continuing",
+            e
+        ));
     }
+
+    let refs: Vec<(ContainerRef, bool)> = containers
+        .iter()
+        .map(|c| (ContainerRef::from(*c), c.is_running()))
+        .collect();
+    let pb = output::spinner(&format!("Destroying {} containers...", refs.len()));
+    let results = futures::future::join_all(refs.iter().map(|(c, running)| async move {
+        let docker = docker_hosts
+            .get(&c.host_name)
+            .ok_or_else(|| anyhow::anyhow!("No Docker connection for host {}", c.host_name))?;
+        if *running {
+            // Graceful stop first; a failure here still falls through to the
+            // forced removal below.
+            if let Err(e) = docker.stop_container(&c.id, 10).await {
+                output::warn(&format!("Graceful stop of {} failed: {:#}", c.name, e));
+            }
+        }
+        docker
+            .remove_container(&c.id, true)
+            .await
+            .map_err(|e| e.context(format!("Failed to remove {} on {}", c.name, c.host_name)))
+    }))
+    .await;
     pb.finish_and_clear();
+    let destroyed = verify::collect_errors(results);
 
-    output::success(&format!("Destroyed {} containers", containers.len()));
-
-    // Sync Traefik config to remove destroyed backends
-    sync_config::sync_traefik_config(config, docker_hosts).await?;
+    // Sync Traefik config to remove destroyed backends (always attempted)
+    let synced = sync_config::sync_traefik_config(config, docker_hosts).await;
+    destroyed?;
+    output::success(&format!("Destroyed {} containers", refs.len()));
+    synced?;
 
     Ok(())
 }

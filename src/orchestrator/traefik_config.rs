@@ -5,13 +5,20 @@
 //! all backends by internal_ip:host_port so Traefik can route to any host.
 
 use std::collections::HashMap;
+use tracing::warn;
 
 use crate::config::types::{Config, ServiceConfig};
 use crate::docker::containers::KorgiContainer;
 use crate::orchestrator::state::LiveState;
 
-/// Path where the dynamic config is written on Traefik hosts.
-pub const TRAEFIK_DYNAMIC_CONFIG_PATH: &str = "/etc/korgi/traefik-dynamic.yml";
+/// Quote a string as a YAML double-quoted scalar.
+///
+/// JSON string syntax is a subset of YAML's double-quoted style, so serde_json's
+/// escaping (quotes, backslashes, control characters, line breaks) produces a
+/// scalar that YAML parses back to exactly the original text.
+pub fn yaml_str(s: &str) -> String {
+    serde_json::to_string(s).expect("serializing a string cannot fail")
+}
 
 /// Generate Traefik dynamic YAML config for all running services.
 /// Maps each service to its backends across hosts using internal addresses and host ports.
@@ -23,17 +30,17 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
         let Some(routing) = &svc_config.routing else {
             continue; // No routing = no Traefik config (background worker)
         };
-        let Some(ports) = &svc_config.ports else {
+        if svc_config.ports.is_none() {
             continue; // No ports = can't route
-        };
+        }
 
         let running = state.running_service_containers(&svc_config.name);
         if running.is_empty() {
             continue;
         }
 
-        let router_name = format!("{}-{}", config.project.name, svc_config.name);
-        let servers = build_server_list(config, svc_config, ports.host_base, &running);
+        let router_name = yaml_str(&format!("{}-{}", config.project.name, svc_config.name));
+        let servers = build_server_list(config, svc_config, &running);
 
         if servers.is_empty() {
             continue;
@@ -41,8 +48,10 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
 
         // Router
         let mut router_yaml = format!(
-            "    {}:\n      rule: \"{}\"\n      service: {}",
-            router_name, routing.rule, router_name,
+            "    {}:\n      rule: {}\n      service: {}",
+            router_name,
+            yaml_str(&routing.rule),
+            router_name,
         );
 
         if !routing.entrypoints.is_empty() {
@@ -51,7 +60,7 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
                 routing
                     .entrypoints
                     .iter()
-                    .map(|ep| format!("        - {}", ep))
+                    .map(|ep| format!("        - {}", yaml_str(ep)))
                     .collect::<Vec<_>>()
                     .join("\n")
             ));
@@ -69,7 +78,7 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
             router_name,
             servers
                 .iter()
-                .map(|url| format!("          - url: \"{}\"", url))
+                .map(|url| format!("          - url: {}", yaml_str(url)))
                 .collect::<Vec<_>>()
                 .join("\n")
         );
@@ -81,7 +90,10 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
                 "leastconnections" => "p2c",
                 other => other,
             };
-            service_yaml.push_str(&format!("\n        strategy: {}", traefik_strategy));
+            service_yaml.push_str(&format!(
+                "\n        strategy: {}",
+                yaml_str(traefik_strategy)
+            ));
         }
 
         // Sticky sessions
@@ -92,15 +104,19 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
                 .unwrap_or_else(|| format!("korgi_{}", svc_config.name));
             service_yaml.push_str(&format!(
                 "\n        sticky:\n          cookie:\n            name: {}\n            secure: {}\n            httpOnly: {}",
-                cookie_name, sticky.secure, sticky.http_only
+                yaml_str(&cookie_name),
+                sticky.secure,
+                sticky.http_only
             ));
         }
 
-        // Add health check if configured
-        if let Some(health) = &svc_config.health {
+        // Add health check if configured with an HTTP path
+        if let Some(health) = svc_config.health.as_ref().filter(|h| !h.path.is_empty()) {
             service_yaml.push_str(&format!(
                 "\n        healthCheck:\n          path: {}\n          interval: {}\n          timeout: {}",
-                health.path, health.interval, health.timeout
+                yaml_str(&health.path),
+                yaml_str(&health.interval),
+                yaml_str(&health.timeout)
             ));
         }
 
@@ -129,17 +145,19 @@ pub fn generate_dynamic_config(config: &Config, state: &LiveState) -> String {
 }
 
 /// Build the list of backend server URLs for a service.
-/// Each running container gets an entry: http://{internal_ip}:{host_port}
+/// Each running container gets an entry: http://{internal_ip}:{host_port}, where
+/// host_port is the port the container actually published (recorded at creation).
 fn build_server_list(
     config: &Config,
     svc: &ServiceConfig,
-    host_base: Option<u16>,
     running: &[&KorgiContainer],
 ) -> Vec<String> {
     let host_map: HashMap<&str, &crate::config::types::HostConfig> =
         config.hosts.iter().map(|h| (h.name.as_str(), h)).collect();
 
-    let container_port = svc.ports.as_ref().map(|p| p.container).unwrap_or(80);
+    let ports = svc.ports.as_ref();
+    let container_port = ports.map(|p| p.container).unwrap_or(80);
+    let expects_host_port = ports.is_some_and(|p| p.host_base.is_some() || p.host.is_some());
 
     let mut urls = Vec::new();
 
@@ -150,17 +168,18 @@ fn build_server_list(
 
         let internal_ip = host_cfg.internal_addr();
 
-        // Determine the host port for this container
-        let port = if let Some(base) = host_base {
-            // Auto-allocated: base + generation offset + instance index
-            let gen_offset = container.generation.saturating_sub(1) as u16 * svc.replicas as u16;
-            base + gen_offset + container.instance as u16
-        } else if let Some(fixed) = svc.ports.as_ref().and_then(|p| p.host) {
-            // Fixed host port (only works for 1 replica per host)
-            fixed
-        } else {
-            // No host port config -- use container port (assumes shared network)
-            container_port
+        let port = match container.host_port {
+            Some(port) => port,
+            None if expects_host_port => {
+                // Never guess: a recomputed port may belong to another container.
+                warn!(
+                    "Container {} on {} has no published host port; not routing to it",
+                    container.name, container.host_name
+                );
+                continue;
+            }
+            // No host port configured -- use container port (assumes shared network)
+            None => container_port,
         };
 
         urls.push(format!("http://{}:{}", internal_ip, port));
@@ -244,7 +263,14 @@ mod tests {
             state: "running".to_string(),
             status: "Up 5 minutes".to_string(),
             health: Some("healthy".to_string()),
+            host_port: Some(9001 + instance as u16),
+            host_port_known: true,
         }
+    }
+
+    fn with_port(mut c: KorgiContainer, port: u16) -> KorgiContainer {
+        c.host_port = Some(port);
+        c
     }
 
     #[test]
@@ -252,9 +278,9 @@ mod tests {
         let config = test_config();
         let state = LiveState {
             containers: vec![
-                make_container("api", 3, 0, "web1"),
-                make_container("api", 3, 1, "web2"),
-                make_container("api", 3, 2, "web1"),
+                with_port(make_container("api", 3, 0, "web1"), 9007),
+                with_port(make_container("api", 3, 1, "web2"), 9008),
+                with_port(make_container("api", 3, 2, "web1"), 9009),
             ],
         };
 
@@ -263,7 +289,7 @@ mod tests {
         assert!(yaml.contains("Generated by korgi"));
         assert!(yaml.contains("myapp-api"));
         assert!(yaml.contains("Host(`api.example.com`)"));
-        // Gen 3, replicas 3, host_base 9001: base + (3-1)*3 + instance
+        // Ports come from each container's recorded host port
         assert!(yaml.contains("http://10.0.0.1:9007")); // instance 0 on web1
         assert!(yaml.contains("http://10.0.0.2:9008")); // instance 1 on web2
         assert!(yaml.contains("http://10.0.0.1:9009")); // instance 2 on web1
@@ -348,8 +374,8 @@ mod tests {
         };
 
         let yaml = generate_dynamic_config(&config, &state);
-        assert!(yaml.contains("- web"));
-        assert!(yaml.contains("- websecure"));
+        assert!(yaml.contains("- \"web\""));
+        assert!(yaml.contains("- \"websecure\""));
         assert!(!yaml.contains("certResolver")); // tls = false
     }
 
@@ -370,5 +396,75 @@ mod tests {
         assert!(yaml.contains(":9002"));
         assert!(yaml.contains(":9003"));
         assert!(yaml.contains(":9004"));
+    }
+
+    #[test]
+    fn test_routes_to_shifted_port_not_recomputed_one() {
+        // The allocator shifted gen 2's range because 9003/9004 were taken by
+        // something else; containers bound 9005/9006. Recomputing
+        // base + (gen-1)*replicas + instance would give 9004/9005 -- wrong.
+        let mut config = test_config();
+        config.services[0].replicas = 2;
+        let state = LiveState {
+            containers: vec![
+                with_port(make_container("api", 2, 0, "web1"), 9005),
+                with_port(make_container("api", 2, 1, "web2"), 9006),
+            ],
+        };
+        let yaml = generate_dynamic_config(&config, &state);
+        assert!(yaml.contains("\"http://10.0.0.1:9005\""));
+        assert!(yaml.contains("\"http://10.0.0.2:9006\""));
+        assert!(!yaml.contains(":9004"));
+    }
+
+    #[test]
+    fn test_old_generation_with_different_replicas_keeps_its_ports() {
+        // Gen 1 ran with 3 replicas, gen 2 with 2; during the overlap both are routed
+        // to the ports each container really bound.
+        let mut config = test_config();
+        config.services[0].replicas = 2;
+        let state = LiveState {
+            containers: vec![
+                with_port(make_container("api", 1, 2, "web1"), 9003),
+                with_port(make_container("api", 2, 0, "web1"), 9005),
+            ],
+        };
+        let yaml = generate_dynamic_config(&config, &state);
+        assert!(yaml.contains("http://10.0.0.1:9003"));
+        assert!(yaml.contains("http://10.0.0.1:9005"));
+    }
+
+    #[test]
+    fn test_container_without_known_port_is_not_routed() {
+        let config = test_config();
+        let mut unknown = make_container("api", 1, 1, "web2");
+        unknown.host_port = None;
+        let state = LiveState {
+            containers: vec![make_container("api", 1, 0, "web1"), unknown],
+        };
+        let yaml = generate_dynamic_config(&config, &state);
+        assert!(yaml.contains("http://10.0.0.1:9001"));
+        assert!(!yaml.contains("10.0.0.2"));
+    }
+
+    #[test]
+    fn test_rule_is_escaped_as_yaml_string() {
+        let mut config = test_config();
+        config.services[0].routing.as_mut().unwrap().rule =
+            r#"Host(`a.com`) && PathRegexp(`^/x\d+"`)"#.to_string();
+        let state = LiveState {
+            containers: vec![make_container("api", 1, 0, "web1")],
+        };
+        let yaml = generate_dynamic_config(&config, &state);
+        let rule_line = yaml
+            .lines()
+            .find(|l| l.trim_start().starts_with("rule:"))
+            .unwrap();
+        let quoted = rule_line.trim_start().trim_start_matches("rule:").trim();
+        // The quoted scalar decodes back to the original rule.
+        let decoded: String = serde_json::from_str(quoted).unwrap();
+        assert_eq!(decoded, config.services[0].routing.as_ref().unwrap().rule);
+        assert!(quoted.contains(r#"\\d"#));
+        assert!(quoted.contains(r#"\""#));
     }
 }
