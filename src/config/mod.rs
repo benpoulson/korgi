@@ -1,3 +1,4 @@
+pub mod duration;
 pub mod interpolate;
 pub mod merge;
 pub mod types;
